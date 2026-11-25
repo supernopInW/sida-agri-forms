@@ -800,6 +800,97 @@ table.agri-table tr.total-row td {
   text-align: center;
 }
 
+/* EXCEL IMPORT DROPZONE */
+.dropzone {
+  border: 2px dashed #86efac;
+  background: var(--primary-subtle);
+  border-radius: 12px;
+  padding: 26px 18px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.dropzone:hover,
+.dropzone.dragover {
+  border-color: var(--primary);
+  background: #dcfce7;
+}
+
+.dropzone-icon {
+  font-size: 36px;
+  margin-bottom: 6px;
+}
+
+.dropzone-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--primary-hover);
+}
+
+.dropzone-sub {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.imp-preview-area {
+  margin-top: 14px;
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  padding: 14px;
+  background: #f8fafc;
+}
+
+.imp-summary-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 10px;
+  font-size: 14px;
+}
+
+.imp-badge {
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-weight: 600;
+}
+
+.imp-badge.ok {
+  background: var(--primary-subtle);
+  border-color: #86efac;
+  color: var(--primary-hover);
+}
+
+.imp-list {
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.imp-list table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.imp-list th,
+.imp-list td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.imp-list th {
+  background: #f1f5f9;
+  position: sticky;
+  top: 0;
+  text-align: left;
+}
+
 /* TOAST */
 .toast {
   position: fixed;

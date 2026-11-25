@@ -982,6 +982,7 @@
       </div>
       <div class="toolbar-right">
         <button class="btn btn-primary btn-sm" id="btn-add-plot">+ เพิ่มเกษตรกร / แปลง</button>
+        <button class="btn btn-outline btn-sm" id="btn-rm-import-xlsx">📤 นำเข้า Excel</button>
         <button class="btn btn-secondary btn-sm" id="btn-export-current">📥 โหลด Excel แบบ รม.</button>
         <button class="btn btn-outline btn-sm" id="btn-print">🖨️ พิมพ์ฟอร์ม รม.</button>
       </div>
@@ -1153,6 +1154,7 @@
       render();
     });
     $('btn-add-plot').addEventListener('click', () => openPlotModal(-1));
+    $('btn-rm-import-xlsx').addEventListener('click', () => openImportExcelModal());
     $('btn-export-current').addEventListener('click', () => exportRMExcel(tambon, village));
     $('btn-print').addEventListener('click', () => {
       const prevSize = state.pageSize;
@@ -1601,6 +1603,354 @@
   }
 
   // ========================
+  // IMPORT EXCEL (.xlsx) TO UPDATE DATA
+  // ========================
+  let pendingExcelImport = null;
+
+  function toNumCell(v) {
+    if (v === null || v === undefined || v === '') return 0;
+    if (typeof v === 'number') return Number.isFinite(v) ? round4(v) : 0;
+    const s = String(v).trim().replace(/,/g, '');
+    if (!s || s === '-') return 0;
+    const n = Number(s);
+    return Number.isFinite(n) ? round4(n) : 0;
+  }
+
+  function cleanCellStr(v) {
+    if (v === null || v === undefined) return '';
+    return String(v).trim();
+  }
+
+  function normalizeThaiName(s) {
+    return String(s || '')
+      .replace(/หมู่(?:ที่)?\s*\d+/g, '')
+      .replace(/ตำบล|บ้าน|ต\.|ม\.|[\.\s_]/g, '')
+      .replace(/ทองหลางใญ่/g, 'ทองหลางใหญ่')
+      .replace(/หนองเทีนมพัฒนา/g, 'หนองเทียมพัฒนา')
+      .replace(/หนองหว้า/g, 'หนองว้า')
+      .replace(/ตะกุดขอน/g, 'ตะกุกขอน')
+      .trim();
+  }
+
+  function matchTargetVillage(sheetName, headerLine, currentTambonHint, fallbackValue) {
+    const h = String(headerLine || '');
+    const s = String(sheetName || '');
+
+    // 1) Detect Tambon from header text first, or currentTambonHint
+    let matchedTambon = null;
+    for (const t of appData.tambons) {
+      if (h.includes('ตำบล' + t.name) || h.includes('ตำบล.' + t.name) || h.includes('ตำบล..' + t.name) || h.includes('ตำบล ' + t.name)) {
+        matchedTambon = t;
+        break;
+      }
+    }
+    if (!matchedTambon) {
+      for (const t of appData.tambons) {
+        const idxT = h.indexOf('ตำบล');
+        if (idxT >= 0 && h.slice(idxT, idxT + 30).includes(t.name)) {
+          matchedTambon = t;
+          break;
+        }
+      }
+    }
+    if (!matchedTambon && currentTambonHint) {
+      matchedTambon = currentTambonHint;
+    }
+
+    // 2) Detect Moo number from sheet name or header
+    const mooMatchSheet = s.match(/(?:หมู่(?:ที่)?|ม\.)\s*(\d+)/);
+    const mooMatchHeader = h.match(/หมู่ที่\s*(\d+)/);
+    const mooNum = mooMatchSheet ? Number(mooMatchSheet[1]) : mooMatchHeader ? Number(mooMatchHeader[1]) : null;
+
+    // 3) Match within matchedTambon by Moo or Village name
+    if (matchedTambon) {
+      if (mooNum) {
+        const byMoo = matchedTambon.villages.find((v) => v.moo === mooNum);
+        if (byMoo) return { tambon: matchedTambon, village: byMoo };
+      }
+      const normS = normalizeThaiName(s);
+      const byName = matchedTambon.villages.find((v) => {
+        const nv = normalizeThaiName(v.name);
+        return nv && (normS.includes(nv) || nv.includes(normS) || normalizeThaiName(h).includes(nv));
+      });
+      if (byName) return { tambon: matchedTambon, village: byName };
+    }
+
+    // 4) Search across all tambons by exact village name + optional moo
+    const normS = normalizeThaiName(s);
+    for (const t of appData.tambons) {
+      for (const v of t.villages) {
+        const nv = normalizeThaiName(v.name);
+        if (nv && normS && (normS === nv || (mooNum === v.moo && (normS.includes(nv) || nv.includes(normS))))) {
+          return { tambon: t, village: v };
+        }
+      }
+    }
+
+    // 5) Fallback to user-selected village when single-sheet import
+    if (fallbackValue) {
+      const [ftId, fvId] = fallbackValue.split('|');
+      const ft = getTambon(ftId);
+      const fv = getVillage(ftId, fvId);
+      if (ft && fv) return { tambon: ft, village: fv, isFallback: true };
+    }
+    return null;
+  }
+
+  function parseRMSheetRows(rows) {
+    // Find header row containing "ชื่อ-สกุลเกษตรกร"
+    let headerIdx = -1;
+    for (let i = 0; i < Math.min(12, rows.length); i++) {
+      const r = rows[i] || [];
+      if (r.some((c) => cleanCellStr(c).includes('ชื่อ-สกุลเกษตรกร'))) {
+        headerIdx = i;
+        break;
+      }
+    }
+    if (headerIdx < 0) return null;
+
+    const headerRow = rows[headerIdx] || [];
+    const cropCols = [];
+    for (let c = 0; c < headerRow.length; c++) {
+      const txt = cleanCellStr(headerRow[c]);
+      if (!txt) continue;
+      let cid = null;
+      if (txt.includes('ข้าวโพด')) cid = 'corn';
+      else if (txt.includes('ข้าว') && txt.includes('1.')) cid = 'rice';
+      else if (txt.includes('มันสำปะหลัง')) cid = 'cassava';
+      else if (txt.includes('อ้อย')) cid = 'sugarcane';
+      else if (txt.includes('ทุเรียน')) cid = 'durian';
+      else if (txt.includes('กล้วยหอม')) cid = 'banana_hom';
+      else if (txt.includes('มะม่วง')) cid = 'mango';
+      else if (txt.includes('ละมุด')) cid = 'sapodilla';
+      else if (txt.includes('น้อยหน่า')) cid = 'sugar_apple';
+      else if (txt.includes('อื่นๆ') || txt.includes('กล้วยน้ำว้า')) cid = 'other_banana';
+      if (cid) cropCols.push({ cid, startC: c });
+    }
+
+    const plots = [];
+    let lastFarmer = '';
+    for (let rIdx = headerIdx + 2; rIdx < rows.length; rIdx++) {
+      const r = rows[rIdx] || [];
+      const c0 = cleanCellStr(r[0]);
+      const c1 = cleanCellStr(r[1]);
+      const c2 = cleanCellStr(r[2]);
+      const c3 = cleanCellStr(r[3]);
+      const c4 = toNumCell(r[4]);
+
+      if (c0.startsWith('รวม') || c1.startsWith('รวม') || c0.includes('ลงชื่อ') || c1.includes('ลงชื่อ')) {
+        break;
+      }
+      if (!c0 && !c1 && !c2 && c4 === 0) continue;
+
+      if (c1) lastFarmer = c1;
+      const plotNo = c2 ? Math.max(1, Math.round(toNumCell(c2))) : 1;
+
+      const cropsData = {};
+      cropCols.forEach(({ cid, startC }) => {
+        if (cid === 'cassava') {
+          const n = toNumCell(r[startC]);
+          const s = toNumCell(r[startC + 1]);
+          const h = toNumCell(r[startC + 2]);
+          const ns = toNumCell(r[startC + 3]);
+          const ks = toNumCell(r[startC + 4]);
+          const p = toNumCell(r[startC + 5]);
+          const y = toNumCell(r[startC + 6]);
+          if (n || s || h || ns || ks || p || y) {
+            cropsData[cid] = { n, s, h, ns, ks, p, y };
+          }
+        } else {
+          const n = toNumCell(r[startC]);
+          const s = toNumCell(r[startC + 1]);
+          const h = toNumCell(r[startC + 2]);
+          let p = toNumCell(r[startC + 3]);
+          const y = toNumCell(r[startC + 4]);
+          if (cid === 'sugarcane' && s === 23 && y === 10000 && p === 23000) p = 230000;
+          if (n || s || h || p || y) {
+            cropsData[cid] = { n, s, h, p, y };
+          }
+        }
+      });
+
+      plots.push({
+        f: lastFarmer,
+        p: plotNo,
+        d: c3,
+        a: c4,
+        c: cropsData,
+      });
+    }
+
+    // Try reading signer from bottom rows
+    let signerName = '';
+    let signerPos = '';
+    for (let i = Math.max(headerIdx + 2, rows.length - 12); i < rows.length; i++) {
+      const joined = (rows[i] || []).map(cleanCellStr).filter(Boolean).join(' ');
+      if (joined.includes('(') && joined.includes(')') && !joined.includes('ไร่') && !joined.includes('กก')) {
+        const ms = joined.match(/\(([^)]+)\)/);
+        if (ms && ms[1].trim().length > 3 && !ms[1].includes('....')) signerName = ms[1].trim();
+      }
+      if (joined.includes('ตำแหน่ง')) {
+        const pos = joined.replace('ตำแหน่ง', '').trim();
+        if (pos && !pos.includes('....')) signerPos = pos;
+      }
+    }
+
+    return { plots, signerName, signerPos };
+  }
+
+  function openImportExcelModal() {
+    pendingExcelImport = null;
+    $('imp-preview-area').hidden = true;
+    $('imp-preview-area').innerHTML = '';
+    $('btn-confirm-import-excel').disabled = true;
+    $('input-import-excel').value = '';
+
+    // Populate fallback village dropdown
+    const opts = [];
+    appData.tambons.forEach((t) => {
+      t.villages.forEach((v) => {
+        const val = `${t.id}|${v.id}`;
+        const sel = t.id === state.tambonId && v.id === state.villageId ? 'selected' : '';
+        opts.push(`<option value="${val}" ${sel}>ต.${escHtml(t.name)} — หมู่ ${v.moo} บ้าน${escHtml(v.name)}</option>`);
+      });
+    });
+    $('imp-fallback-village').innerHTML = opts.join('');
+    $('import-excel-modal').hidden = false;
+  }
+
+  function handleExcelFileSelected(file) {
+    if (!file) return;
+    if (typeof XLSX === 'undefined') {
+      alert('ไม่พบไลบรารี SheetJS กรุณาเชื่อมต่ออินเทอร์เน็ต');
+      return;
+    }
+
+    const preview = $('imp-preview-area');
+    preview.hidden = false;
+    preview.innerHTML = `<div style="text-align:center;padding:16px;color:#475569;">⏳ กำลังอ่านไฟล์ <strong>${escHtml(file.name)}</strong> ...</div>`;
+
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const wb = XLSX.read(new Uint8Array(ev.target.result), { type: 'array' });
+        const fallbackVal = wb.SheetNames.length === 1 ? $('imp-fallback-village').value : null;
+
+        let currentTambonHint = null;
+        const matchedSheets = [];
+        const skippedSheets = [];
+
+        wb.SheetNames.forEach((sName) => {
+          const ws = wb.Sheets[sName];
+          const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+          if (!rows || rows.length < 5) {
+            skippedSheets.push({ name: sName, reason: 'ไม่มีข้อมูล' });
+            return;
+          }
+          const r1 = cleanCellStr(rows[0] && rows[0][0]);
+
+          // Check if it is a Tambon (รต.) sheet -> update currentTambonHint and skip
+          if (sName.startsWith('ตำบล') || r1.includes('(รต.)') || r1.includes('รายตำบล')) {
+            const foundT = appData.tambons.find((t) => sName.includes(t.name) || r1.includes(t.name));
+            if (foundT) currentTambonHint = foundT;
+            skippedSheets.push({ name: sName, reason: 'แบบ รต. (ระบบคำนวณอัตโนมัติจาก รม.)' });
+            return;
+          }
+          if (sName.includes('อำเภอสีดา') || r1.includes('(รอ.)') || r1.includes('รายอำเภอ')) {
+            skippedSheets.push({ name: sName, reason: 'แบบ รอ. (ระบบคำนวณอัตโนมัติจาก รม.)' });
+            return;
+          }
+
+          const parsed = parseRMSheetRows(rows);
+          if (!parsed) {
+            skippedSheets.push({ name: sName, reason: 'ไม่พบหัวตารางแบบ รม.' });
+            return;
+          }
+
+          const target = matchTargetVillage(sName, r1, currentTambonHint, fallbackVal);
+          if (!target) {
+            skippedSheets.push({ name: sName, reason: 'จับคู่ชื่อหมู่บ้านไม่พบ' });
+            return;
+          }
+
+          const totalArea = round4(parsed.plots.reduce((acc, p) => acc + Number(p.a || 0), 0));
+          matchedSheets.push({
+            sheetName: sName,
+            tambonId: target.tambon.id,
+            tambonName: target.tambon.name,
+            villageId: target.village.id,
+            villageMoo: target.village.moo,
+            villageName: target.village.name,
+            plots: parsed.plots,
+            totalArea,
+            signerName: parsed.signerName,
+            signerPos: parsed.signerPos,
+          });
+        });
+
+        if (matchedSheets.length === 0) {
+          pendingExcelImport = null;
+          $('btn-confirm-import-excel').disabled = true;
+          preview.innerHTML = `
+            <div style="color:#dc2626;font-weight:700;margin-bottom:6px;">❌ ไม่พบชีตแบบ รม. ที่สามารถนำเข้าได้ในไฟล์นี้</div>
+            <div style="font-size:13px;color:#475569;">ตรวจสอบว่าไฟล์มีคอลัมน์ "ชื่อ-สกุลเกษตรกร" ตามแบบฟอร์ม รม. หรือดาวน์โหลดไฟล์ต้นแบบจากปุ่ม "โหลด Excel" ไปแก้ไขแล้วอัปโหลดกลับมา</div>
+          `;
+          return;
+        }
+
+        pendingExcelImport = { fileName: file.name, matchedSheets };
+        $('btn-confirm-import-excel').disabled = false;
+
+        const sumPlots = matchedSheets.reduce((a, x) => a + x.plots.length, 0);
+        const sumArea = matchedSheets.reduce((a, x) => a + x.totalArea, 0);
+        const rowsHtml = matchedSheets
+          .map(
+            (m) => `
+            <tr>
+              <td>${escHtml(m.sheetName)}</td>
+              <td><strong>ต.${escHtml(m.tambonName)}</strong> ม.${m.villageMoo} บ้าน${escHtml(m.villageName)}</td>
+              <td style="text-align:right;">${fmtNumZero(m.plots.length, 0)} แปลง</td>
+              <td style="text-align:right;">${fmtNumZero(m.totalArea, 2)} ไร่</td>
+            </tr>`
+          )
+          .join('');
+
+        preview.innerHTML = `
+          <div class="imp-summary-banner">
+            <div class="imp-badge ok">✅ พบข้อมูลแบบ รม. ${matchedSheets.length} หมู่บ้าน</div>
+            <div class="imp-badge">รวม ${fmtNumZero(sumPlots, 0)} แปลง</div>
+            <div class="imp-badge">พื้นที่รวม ${fmtNumZero(sumArea, 2)} ไร่</div>
+          </div>
+          <div class="imp-list">
+            <table>
+              <thead>
+                <tr>
+                  <th>ชื่อชีตใน Excel</th>
+                  <th>หมู่บ้านปลายทางที่จะอัปเดต</th>
+                  <th style="text-align:right;">จำนวนแปลง</th>
+                  <th style="text-align:right;">พื้นที่ (ไร่)</th>
+                </tr>
+              </thead>
+              <tbody>${rowsHtml}</tbody>
+            </table>
+          </div>
+          ${
+            skippedSheets.length > 0
+              ? `<div style="margin-top:8px;font-size:12px;color:#64748b;">ข้ามชีตที่ไม่ใช่ รม. จำนวน ${skippedSheets.length} ชีต (เช่น รอ./รต. ซึ่งระบบจะคำนวณรวมใหม่ให้อัตโนมัติ)</div>`
+              : ''
+          }
+        `;
+      } catch (err) {
+        console.error(err);
+        pendingExcelImport = null;
+        $('btn-confirm-import-excel').disabled = true;
+        preview.innerHTML = `<div style="color:#dc2626;font-weight:700;">❌ อ่านไฟล์ Excel ไม่สำเร็จ: ${escHtml(err.message)}</div>`;
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  // ========================
   // NAVIGATION & RENDER
   // ========================
   function switchView(viewName) {
@@ -1805,6 +2155,59 @@
 
     // Export All 56 Sheets
     $('btn-export-all-xlsx').addEventListener('click', exportAllWorkbookExcel);
+
+    // Import Excel Modal
+    $('btn-open-import-xlsx').addEventListener('click', openImportExcelModal);
+    const dropzone = $('excel-dropzone');
+    const excelInput = $('input-import-excel');
+    dropzone.addEventListener('click', () => excelInput.click());
+    excelInput.addEventListener('change', (e) => {
+      if (e.target.files && e.target.files[0]) handleExcelFileSelected(e.target.files[0]);
+    });
+    dropzone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropzone.classList.add('dragover');
+    });
+    dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+    dropzone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropzone.classList.remove('dragover');
+      if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+        handleExcelFileSelected(e.dataTransfer.files[0]);
+      }
+    });
+
+    $('btn-confirm-import-excel').addEventListener('click', () => {
+      if (!pendingExcelImport || !pendingExcelImport.matchedSheets.length) return;
+      const mode = $('imp-mode').value; // 'replace' | 'append'
+      let updatedVillages = 0;
+      let totalPlotsImported = 0;
+
+      pendingExcelImport.matchedSheets.forEach((item) => {
+        const v = getVillage(item.tambonId, item.villageId);
+        if (!v) return;
+        if (mode === 'replace') {
+          v.plots = item.plots;
+        } else {
+          v.plots = v.plots.concat(item.plots);
+        }
+        if (item.signerName) v.signerName = item.signerName;
+        if (item.signerPos) v.signerPos = item.signerPos;
+        updatedVillages++;
+        totalPlotsImported += item.plots.length;
+      });
+
+      // If single village imported, jump to that village or stay on dashboard
+      if (pendingExcelImport.matchedSheets.length === 1) {
+        state.tambonId = pendingExcelImport.matchedSheets[0].tambonId;
+        state.villageId = pendingExcelImport.matchedSheets[0].villageId;
+      }
+
+      saveData();
+      $('import-excel-modal').hidden = true;
+      render();
+      showToast(`✅ อัปเดตจาก Excel สำเร็จ! (${updatedVillages} หมู่บ้าน / ${fmtNumZero(totalPlotsImported, 0)} แปลง)`);
+    });
 
     // Backup / Restore Modal
     $('btn-backup').addEventListener('click', () => {

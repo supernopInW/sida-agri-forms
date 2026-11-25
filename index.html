@@ -52,8 +52,9 @@
         </div>
       </div>
       <div class="topbar-actions">
-        <button class="btn btn-outline btn-sm" id="btn-edit-meta" title="แก้ไขวันที่/ผู้ลงนาม">⚙️ ตั้งค่าฟอร์ม</button>
+        <button class="btn btn-outline btn-sm" id="btn-open-import-xlsx" title="อัปโหลดไฟล์ Excel (.xlsx) เพื่ออัปเดตข้อมูล">📤 นำเข้า Excel</button>
         <button class="btn btn-outline btn-sm" id="btn-export-all-xlsx" title="ดาวน์โหลด Excel ทั้ง 56 ชีต (รอ./รต./รม.)">📊 โหลด Excel ทั้งหมด</button>
+        <button class="btn btn-outline btn-sm" id="btn-edit-meta" title="แก้ไขวันที่/ผู้ลงนาม">⚙️ ตั้งค่าฟอร์ม</button>
         <button class="btn btn-outline btn-sm" id="btn-backup" title="สำรอง/กู้คืนข้อมูล">💾 สำรองข้อมูล</button>
         <button class="btn btn-danger-outline btn-sm" id="btn-logout">ออกจากระบบ</button>
       </div>
@@ -228,6 +229,48 @@
           <button type="submit" class="btn btn-primary">บันทึกการตั้งค่า</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- MODAL: IMPORT EXCEL (.xlsx) -->
+  <div id="import-excel-modal" class="modal-backdrop" hidden>
+    <div class="modal-dialog modal-lg">
+      <div class="modal-header">
+        <h2>📤 นำเข้าไฟล์ Excel (.xlsx) เพื่ออัปเดตข้อมูล</h2>
+        <button class="modal-close" data-close="import-excel-modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="info-pill" style="margin-bottom:14px;">
+          รองรับไฟล์ <strong>Excel (.xlsx / .xls)</strong> ทั้งแบบ <strong>ทั้งอำเภอ (หลายชีต รม.)</strong> และแบบ <strong>รายหมู่บ้าน (1 ชีต รม.)</strong> ที่ดาวน์โหลดจากระบบนี้หรือไฟล์แบบฟอร์มราชการ ระบบจะอัปเดต รม. → รต. → รอ. และแดชบอร์ดให้อัตโนมัติ
+        </div>
+
+        <div class="form-grid-2">
+          <div class="form-group">
+            <label>โหมดการอัปเดตข้อมูล</label>
+            <select id="imp-mode">
+              <option value="replace" selected>แทนที่ข้อมูลเดิมในหมู่บ้านที่ตรงกัน (แนะนำ)</option>
+              <option value="append">เพิ่มต่อท้ายข้อมูลเดิม (ไม่ลบรายชื่อเก่า)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>กรณีไฟล์มี 1 ชีต (เลือกหมู่บ้านปลายทางกรณีระบบหาไม่พบ)</label>
+            <select id="imp-fallback-village"></select>
+          </div>
+        </div>
+
+        <div class="dropzone" id="excel-dropzone">
+          <div class="dropzone-icon">📑</div>
+          <div class="dropzone-title">คลิกเลือกไฟล์ Excel (.xlsx / .xls) หรือลากไฟล์มาวางที่นี่</div>
+          <div class="dropzone-sub">ระบบจะอ่านและแสดงสรุปข้อมูลให้ตรวจสอบก่อนบันทึกจริง</div>
+          <input type="file" id="input-import-excel" accept=".xlsx,.xls" hidden />
+        </div>
+
+        <div id="imp-preview-area" class="imp-preview-area" hidden></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline" data-close="import-excel-modal">ยกเลิก</button>
+        <button type="button" class="btn btn-primary" id="btn-confirm-import-excel" disabled>✅ ยืนยันอัปเดตข้อมูล</button>
+      </div>
     </div>
   </div>
 
