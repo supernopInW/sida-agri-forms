@@ -1,0 +1,1434 @@
+(() => {
+  'use strict';
+
+  const ACCESS_PIN = '123456';
+  const STORAGE_KEY = 'sida_agri_data_v1';
+  const AUTH_SESSION_KEY = 'sida_agri_auth_ok';
+
+  // Application State
+  let appData = null;
+  let state = {
+    view: 'ro', // 'ro' | 'rt' | 'rm'
+    tambonId: 't1',
+    villageId: 't1_m1',
+    search: '',
+    cropFilter: 'all',
+    showAllCrops: false, // false = only crops with data, true = all 10 crops
+    page: 1,
+    pageSize: 50,
+  };
+
+  // DOM Shortcuts
+  const $ = (id) => document.getElementById(id);
+
+  // Formatters
+  function fmtNum(n, maxDec = 2) {
+    if (n === null || n === undefined || n === '' || Number.isNaN(Number(n))) return '';
+    const v = Number(n);
+    if (v === 0) return '';
+    return v.toLocaleString('th-TH', { maximumFractionDigits: maxDec });
+  }
+
+  function fmtNumZero(n, maxDec = 2) {
+    const v = Number(n || 0);
+    return v.toLocaleString('th-TH', { maximumFractionDigits: maxDec });
+  }
+
+  function round4(n) {
+    return Math.round((Number(n) || 0) * 10000) / 10000;
+  }
+
+  function escHtml(str) {
+    return String(str ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function showToast(msg) {
+    const t = $('toast');
+    t.textContent = msg;
+    t.hidden = false;
+    clearTimeout(t._timer);
+    t._timer = setTimeout(() => {
+      t.hidden = true;
+    }, 2800);
+  }
+
+  // Persistence
+  function loadData() {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        appData = JSON.parse(saved);
+        return;
+      }
+    } catch (e) {
+      console.warn('localStorage load failed, using initial data', e);
+    }
+    appData = JSON.parse(JSON.stringify(window.INITIAL_AGRI_DATA));
+  }
+
+  function saveData() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(appData));
+      const ind = $('save-indicator');
+      if (ind) {
+        ind.textContent = '✓ บันทึกแล้ว (' + new Date().toLocaleTimeString('th-TH') + ')';
+      }
+    } catch (e) {
+      console.error('Save failed:', e);
+      showToast('⚠️ พื้นที่จัดเก็บเบราว์เซอร์เต็ม แนะนำให้กดสำรองข้อมูล (.json)');
+    }
+  }
+
+  // Data Lookups
+  function getTambon(id) {
+    return appData.tambons.find((t) => t.id === id) || appData.tambons[0];
+  }
+
+  function getVillage(tambonId, villageId) {
+    const t = getTambon(tambonId);
+    return t.villages.find((v) => v.id === villageId) || t.villages[0];
+  }
+
+  // Aggregation Engine: รม. -> รต. -> รอ.
+  function emptyCropAgg() {
+    const obj = {};
+    appData.crops.forEach((c) => {
+      obj[c.id] = { n: 0, s: 0, h: 0, ns: 0, ks: 0, p: 0, y: 0, _effArea: 0 };
+    });
+    return obj;
+  }
+
+  function computeAvgYield(agg) {
+    const denom = agg._effArea > 0 ? agg._effArea : (agg.h > 0 ? agg.h : agg.s > 0 ? agg.s : agg.n > 0 ? agg.n : 0);
+    if (denom > 0 && agg.p > 0) {
+      return Math.round(agg.p / denom);
+    }
+    return 0;
+  }
+
+  function summarizeVillage(village) {
+    const farmerSet = new Set();
+    let totalArea = 0;
+    const crops = emptyCropAgg();
+
+    village.plots.forEach((plot) => {
+      if (plot.f && plot.f.trim()) farmerSet.add(plot.f.trim());
+      totalArea += Number(plot.a || 0);
+      if (plot.c) {
+        Object.keys(plot.c).forEach((cid) => {
+          if (!crops[cid]) return;
+          const cv = plot.c[cid];
+          const n = Number(cv.n || 0);
+          const s = Number(cv.s || 0);
+          const h = Number(cv.h || 0);
+          const p = Number(cv.p || 0);
+          const y = Number(cv.y || 0);
+          crops[cid].n += n;
+          crops[cid].s += s;
+          crops[cid].h += h;
+          crops[cid].ns += Number(cv.ns || 0);
+          crops[cid].ks += Number(cv.ks || 0);
+          crops[cid].p += p;
+          const eff = p > 0 && y > 0 ? p / y : Math.max(n, s, h);
+          crops[cid]._effArea += eff;
+        });
+      }
+    });
+
+    Object.keys(crops).forEach((cid) => {
+      crops[cid].n = round4(crops[cid].n);
+      crops[cid].s = round4(crops[cid].s);
+      crops[cid].h = round4(crops[cid].h);
+      crops[cid].ns = round4(crops[cid].ns);
+      crops[cid].ks = round4(crops[cid].ks);
+      crops[cid].p = round4(crops[cid].p);
+      crops[cid].y = computeAvgYield(crops[cid]);
+    });
+
+    return {
+      farmersCount: farmerSet.size,
+      plotsCount: village.plots.length,
+      totalArea: round4(totalArea),
+      crops,
+    };
+  }
+
+  function summarizeTambon(tambon) {
+    let farmersCount = 0;
+    let plotsCount = 0;
+    let totalArea = 0;
+    const crops = emptyCropAgg();
+
+    const villageSummaries = tambon.villages.map((v) => {
+      const vs = summarizeVillage(v);
+      farmersCount += vs.farmersCount;
+      plotsCount += vs.plotsCount;
+      totalArea += vs.totalArea;
+      Object.keys(crops).forEach((cid) => {
+        crops[cid].n += vs.crops[cid].n;
+        crops[cid].s += vs.crops[cid].s;
+        crops[cid].h += vs.crops[cid].h;
+        crops[cid].ns += vs.crops[cid].ns;
+        crops[cid].ks += vs.crops[cid].ks;
+        crops[cid].p += vs.crops[cid].p;
+        crops[cid]._effArea += vs.crops[cid]._effArea;
+      });
+      return { village: v, summary: vs };
+    });
+
+    Object.keys(crops).forEach((cid) => {
+      crops[cid].n = round4(crops[cid].n);
+      crops[cid].s = round4(crops[cid].s);
+      crops[cid].h = round4(crops[cid].h);
+      crops[cid].ns = round4(crops[cid].ns);
+      crops[cid].ks = round4(crops[cid].ks);
+      crops[cid].p = round4(crops[cid].p);
+      crops[cid].y = computeAvgYield(crops[cid]);
+    });
+
+    return {
+      farmersCount,
+      plotsCount,
+      totalArea: round4(totalArea),
+      crops,
+      villageSummaries,
+    };
+  }
+
+  function summarizeDistrict() {
+    let farmersCount = 0;
+    let plotsCount = 0;
+    let totalArea = 0;
+    const crops = emptyCropAgg();
+
+    const tambonSummaries = appData.tambons.map((t) => {
+      const ts = summarizeTambon(t);
+      farmersCount += ts.farmersCount;
+      plotsCount += ts.plotsCount;
+      totalArea += ts.totalArea;
+      Object.keys(crops).forEach((cid) => {
+        crops[cid].n += ts.crops[cid].n;
+        crops[cid].s += ts.crops[cid].s;
+        crops[cid].h += ts.crops[cid].h;
+        crops[cid].ns += ts.crops[cid].ns;
+        crops[cid].ks += ts.crops[cid].ks;
+        crops[cid].p += ts.crops[cid].p;
+        crops[cid]._effArea += ts.crops[cid]._effArea;
+      });
+      return { tambon: t, summary: ts };
+    });
+
+    Object.keys(crops).forEach((cid) => {
+      crops[cid].n = round4(crops[cid].n);
+      crops[cid].s = round4(crops[cid].s);
+      crops[cid].h = round4(crops[cid].h);
+      crops[cid].ns = round4(crops[cid].ns);
+      crops[cid].ks = round4(crops[cid].ks);
+      crops[cid].p = round4(crops[cid].p);
+      crops[cid].y = computeAvgYield(crops[cid]);
+    });
+
+    return {
+      farmersCount,
+      plotsCount,
+      totalArea: round4(totalArea),
+      crops,
+      tambonSummaries,
+    };
+  }
+
+  function getVisibleCrops(cropsAgg) {
+    if (state.showAllCrops) return appData.crops;
+    const active = appData.crops.filter((c) => {
+      const a = cropsAgg[c.id];
+      return a && (a.n > 0 || a.s > 0 || a.h > 0 || a.p > 0);
+    });
+    return active.length > 0 ? active : [appData.crops[0]];
+  }
+
+  // Update KPI Cards
+  function updateKPIs(summary) {
+    $('kpi-farmers').textContent = fmtNumZero(summary.farmersCount, 0);
+    $('kpi-plots').textContent = fmtNumZero(summary.plotsCount, 0);
+    $('kpi-area').textContent = fmtNumZero(summary.totalArea, 2);
+    $('kpi-rice-prod').textContent = fmtNumZero(summary.crops.rice.p, 0);
+    let otherArea = 0;
+    appData.crops.forEach((c) => {
+      if (c.id !== 'rice') {
+        const a = summary.crops[c.id];
+        otherArea += (a.n || 0) + (a.s || 0) + (a.h || 0);
+      }
+    });
+    $('kpi-other-area').textContent = fmtNumZero(otherArea, 2);
+  }
+
+  function updateHeaderDate() {
+    const m = appData.meta;
+    $('topbar-date-info').textContent = `ข้อมูล ณ วันที่ ${m.reportDay} ${m.reportMonth} พ.ศ. ${m.reportYear} • เชื่อมโยง รม. → รต. → รอ. อัตโนมัติ`;
+  }
+
+  // Render Crop Headers (Shared across รอ. / รต. / รม.)
+  function renderCropTableHeaders(visibleCrops) {
+    let row1 = '';
+    let row2 = '';
+    visibleCrops.forEach((crop, idx) => {
+      const span = crop.hasCassavaSplit ? 7 : 5;
+      const alt = idx % 2 === 1 ? ' alt' : '';
+      const varietyTxt = crop.variety ? `/พันธุ์ ${crop.variety}` : '';
+      row1 += `<th colspan="${span}" class="crop-header${alt}">${crop.num}. ${escHtml(crop.name)}${escHtml(varietyTxt)}</th>`;
+      if (crop.hasCassavaSplit) {
+        row2 += `<th>ปลูกใหม่<br>(ไร่)</th><th>ยืนต้น<br>(ไร่)</th><th>เก็บเกี่ยว<br>(ไร่)</th><th>ไม่เก็บท่อนพันธุ์<br>(ไร่)</th><th>เก็บท่อนพันธุ์<br>(ไร่)</th><th>ผลผลิตรวม<br>(กก.)</th><th>เฉลี่ย<br>(กก./ไร่)</th>`;
+      } else {
+        row2 += `<th>ปลูกใหม่<br>(ไร่)</th><th>ยืนต้น<br>(ไร่)</th><th>เก็บเกี่ยว<br>(ไร่)</th><th>ผลผลิตรวม<br>(กก.)</th><th>เฉลี่ย<br>(กก./ไร่)</th>`;
+      }
+    });
+    return { row1, row2 };
+  }
+
+  function renderCropCells(cropsObj, visibleCrops) {
+    let html = '';
+    visibleCrops.forEach((crop) => {
+      const cv = (cropsObj && cropsObj[crop.id]) || {};
+      if (crop.hasCassavaSplit) {
+        html += `<td class="num">${fmtNum(cv.n)}</td>`;
+        html += `<td class="num">${fmtNum(cv.s)}</td>`;
+        html += `<td class="num">${fmtNum(cv.h)}</td>`;
+        html += `<td class="num">${fmtNum(cv.ns)}</td>`;
+        html += `<td class="num">${fmtNum(cv.ks)}</td>`;
+        html += `<td class="num">${fmtNum(cv.p, 0)}</td>`;
+        html += `<td class="num">${fmtNum(cv.y, 0)}</td>`;
+      } else {
+        html += `<td class="num">${fmtNum(cv.n)}</td>`;
+        html += `<td class="num">${fmtNum(cv.s)}</td>`;
+        html += `<td class="num">${fmtNum(cv.h)}</td>`;
+        html += `<td class="num">${fmtNum(cv.p, 0)}</td>`;
+        html += `<td class="num">${fmtNum(cv.y, 0)}</td>`;
+      }
+    });
+    return html;
+  }
+
+  // ========================
+  // VIEW 1: รอ. (รายอำเภอ)
+  // ========================
+  function renderViewRO() {
+    const dist = summarizeDistrict();
+    updateKPIs(dist);
+    const visibleCrops = getVisibleCrops(dist.crops);
+    const m = appData.meta;
+
+    // Toolbar
+    $('toolbar').innerHTML = `
+      <div class="toolbar-group">
+        <label><input type="checkbox" id="chk-all-crops" ${state.showAllCrops ? 'checked' : ''} /> แสดงครบทั้ง 10 ชนิดพืช (ฟอร์มเต็ม)</label>
+      </div>
+      <div class="toolbar-right">
+        <button class="btn btn-primary btn-sm" id="btn-quick-add">+ เพิ่มข้อมูลเกษตรกร (รม.)</button>
+        <button class="btn btn-secondary btn-sm" id="btn-export-current">📥 โหลด Excel แบบ รอ.</button>
+        <button class="btn btn-outline btn-sm" id="btn-print">🖨️ พิมพ์ฟอร์ม รอ.</button>
+      </div>
+    `;
+
+    // Official Header
+    $('official-header').innerHTML = `
+      <h2>แบบจัดเก็บข้อมูลการผลิตทางการเกษตรด้านพืชรายอำเภอ ${escHtml(m.district)} จังหวัด${escHtml(m.province)} (รอ.)</h2>
+      <p>ข้อมูล ณ วันที่ ${escHtml(m.reportDay)} เดือน ${escHtml(m.reportMonth)} พ.ศ. ${escHtml(m.reportYear)}</p>
+    `;
+
+    const headers = renderCropTableHeaders(visibleCrops);
+    let bodyRows = '';
+    dist.tambonSummaries.forEach((item, i) => {
+      bodyRows += `
+        <tr>
+          <td class="center">${i + 1}</td>
+          <td class="link-cell" data-goto-tambon="${item.tambon.id}" title="คลิกเพื่อดูแบบ รต. ตำบล${escHtml(item.tambon.name)}">${escHtml(item.tambon.name)}</td>
+          <td class="num">${fmtNumZero(item.summary.farmersCount, 0)}</td>
+          <td class="num">${fmtNumZero(item.summary.totalArea, 2)}</td>
+          ${renderCropCells(item.summary.crops, visibleCrops)}
+        </tr>
+      `;
+    });
+
+    const totalRow = `
+      <tr class="total-row">
+        <td class="center" colspan="2">รวมทั้งหมด (${dist.tambonSummaries.length} ตำบล)</td>
+        <td class="num">${fmtNumZero(dist.farmersCount, 0)}</td>
+        <td class="num">${fmtNumZero(dist.totalArea, 2)}</td>
+        ${renderCropCells(dist.crops, visibleCrops)}
+      </tr>
+    `;
+
+    $('table-wrapper').innerHTML = `
+      <table class="agri-table">
+        <thead>
+          <tr>
+            <th rowspan="2">ที่</th>
+            <th rowspan="2">ตำบล (คลิกเพื่อดู รต.)</th>
+            <th rowspan="2">ครัวเรือน<br>เกษตรกร (ราย)</th>
+            <th rowspan="2">พื้นที่การเกษตร<br>(ไร่)</th>
+            ${headers.row1}
+          </tr>
+          <tr>${headers.row2}</tr>
+        </thead>
+        <tbody>
+          ${bodyRows}
+          ${totalRow}
+        </tbody>
+      </table>
+    `;
+
+    $('pagination-bar').hidden = true;
+
+    $('official-footer').innerHTML = `
+      <div class="sign-block">
+        <div>ลงชื่อ ............................................................</div>
+        <div>(${escHtml(m.districtOfficer)})</div>
+        <div>ตำแหน่ง ${escHtml(m.districtPosition)}</div>
+      </div>
+    `;
+
+    // Bind events
+    $('chk-all-crops').addEventListener('change', (e) => {
+      state.showAllCrops = e.target.checked;
+      render();
+    });
+    $('btn-quick-add').addEventListener('click', () => openPlotModal(-1));
+    $('btn-export-current').addEventListener('click', () => exportROExcel());
+    $('btn-print').addEventListener('click', () => window.print());
+    document.querySelectorAll('[data-goto-tambon]').forEach((el) => {
+      el.addEventListener('click', () => {
+        state.tambonId = el.dataset.gotoTambon;
+        const t = getTambon(state.tambonId);
+        state.villageId = t.villages[0].id;
+        switchView('rt');
+      });
+    });
+  }
+
+  // ========================
+  // VIEW 2: รต. (รายตำบล)
+  // ========================
+  function renderViewRT() {
+    const tambon = getTambon(state.tambonId);
+    const ts = summarizeTambon(tambon);
+    updateKPIs(ts);
+    const visibleCrops = getVisibleCrops(ts.crops);
+    const m = appData.meta;
+
+    const tambonOptions = appData.tambons
+      .map((t) => `<option value="${t.id}" ${t.id === tambon.id ? 'selected' : ''}>ตำบล${escHtml(t.name)} (${t.villages.length} หมู่บ้าน)</option>`)
+      .join('');
+
+    $('toolbar').innerHTML = `
+      <div class="toolbar-group">
+        <label>เลือกตำบล:</label>
+        <select id="sel-rt-tambon">${tambonOptions}</select>
+      </div>
+      <div class="toolbar-group">
+        <label><input type="checkbox" id="chk-all-crops" ${state.showAllCrops ? 'checked' : ''} /> แสดงครบทั้ง 10 ชนิดพืช</label>
+      </div>
+      <div class="toolbar-right">
+        <button class="btn btn-primary btn-sm" id="btn-quick-add">+ เพิ่มข้อมูลเกษตรกร (รม.)</button>
+        <button class="btn btn-secondary btn-sm" id="btn-export-current">📥 โหลด Excel แบบ รต.</button>
+        <button class="btn btn-outline btn-sm" id="btn-print">🖨️ พิมพ์ฟอร์ม รต.</button>
+      </div>
+    `;
+
+    $('official-header').innerHTML = `
+      <h2>แบบจัดเก็บข้อมูลการผลิตทางการเกษตรด้านพืชรายตำบล ${escHtml(tambon.name)} อำเภอ${escHtml(m.district)} จังหวัด${escHtml(m.province)} (รต.)</h2>
+      <p>ข้อมูล ณ วันที่ ${escHtml(m.reportDay)} เดือน ${escHtml(m.reportMonth)} พ.ศ. ${escHtml(m.reportYear)}</p>
+    `;
+
+    const headers = renderCropTableHeaders(visibleCrops);
+    let bodyRows = '';
+    ts.villageSummaries.forEach((item) => {
+      bodyRows += `
+        <tr>
+          <td class="center">${item.village.moo}</td>
+          <td class="link-cell" data-goto-village="${item.village.id}" title="คลิกเพื่อดู/แก้ไขแบบ รม. บ้าน${escHtml(item.village.name)}">${escHtml(item.village.name)}</td>
+          <td class="num">${fmtNumZero(item.summary.farmersCount, 0)}</td>
+          <td class="num">${fmtNumZero(item.summary.totalArea, 2)}</td>
+          ${renderCropCells(item.summary.crops, visibleCrops)}
+        </tr>
+      `;
+    });
+
+    const totalRow = `
+      <tr class="total-row">
+        <td class="center" colspan="2">รวมตำบล${escHtml(tambon.name)} (${ts.villageSummaries.length} หมู่บ้าน)</td>
+        <td class="num">${fmtNumZero(ts.farmersCount, 0)}</td>
+        <td class="num">${fmtNumZero(ts.totalArea, 2)}</td>
+        ${renderCropCells(ts.crops, visibleCrops)}
+      </tr>
+    `;
+
+    $('table-wrapper').innerHTML = `
+      <table class="agri-table">
+        <thead>
+          <tr>
+            <th rowspan="2">หมู่ที่</th>
+            <th rowspan="2">ชื่อหมู่บ้าน (คลิกเพื่อดู รม.)</th>
+            <th rowspan="2">ครัวเรือน<br>เกษตรกร (ราย)</th>
+            <th rowspan="2">พื้นที่การเกษตร<br>(ไร่)</th>
+            ${headers.row1}
+          </tr>
+          <tr>${headers.row2}</tr>
+        </thead>
+        <tbody>
+          ${bodyRows}
+          ${totalRow}
+        </tbody>
+      </table>
+    `;
+
+    $('pagination-bar').hidden = true;
+
+    $('official-footer').innerHTML = `
+      <div class="sign-block">
+        <div>ลงชื่อ ............................................................</div>
+        <div>(${escHtml(m.districtOfficer)})</div>
+        <div>ตำแหน่ง ${escHtml(m.districtPosition)}</div>
+      </div>
+    `;
+
+    $('sel-rt-tambon').addEventListener('change', (e) => {
+      state.tambonId = e.target.value;
+      const t = getTambon(state.tambonId);
+      state.villageId = t.villages[0].id;
+      render();
+    });
+    $('chk-all-crops').addEventListener('change', (e) => {
+      state.showAllCrops = e.target.checked;
+      render();
+    });
+    $('btn-quick-add').addEventListener('click', () => openPlotModal(-1));
+    $('btn-export-current').addEventListener('click', () => exportRTExcel(tambon));
+    $('btn-print').addEventListener('click', () => window.print());
+    document.querySelectorAll('[data-goto-village]').forEach((el) => {
+      el.addEventListener('click', () => {
+        state.villageId = el.dataset.gotoVillage;
+        state.page = 1;
+        state.search = '';
+        switchView('rm');
+      });
+    });
+  }
+
+  // ========================
+  // VIEW 3: รม. (รายหมู่บ้าน)
+  // ========================
+  function renderViewRM() {
+    const tambon = getTambon(state.tambonId);
+    const village = getVillage(state.tambonId, state.villageId);
+    state.villageId = village.id;
+    const vs = summarizeVillage(village);
+    updateKPIs(vs);
+    const visibleCrops = getVisibleCrops(vs.crops);
+    const m = appData.meta;
+
+    const tambonOptions = appData.tambons
+      .map((t) => `<option value="${t.id}" ${t.id === tambon.id ? 'selected' : ''}>ต.${escHtml(t.name)}</option>`)
+      .join('');
+    const villageOptions = tambon.villages
+      .map((v) => `<option value="${v.id}" ${v.id === village.id ? 'selected' : ''}>หมู่ ${v.moo} บ้าน${escHtml(v.name)} (${v.plots.length} แปลง)</option>`)
+      .join('');
+    const cropFilterOptions =
+      `<option value="all" ${state.cropFilter === 'all' ? 'selected' : ''}>ทุกชนิดพืช</option>` +
+      appData.crops
+        .map((c) => `<option value="${c.id}" ${state.cropFilter === c.id ? 'selected' : ''}>${c.num}. ${escHtml(c.name)}</option>`)
+        .join('');
+
+    $('toolbar').innerHTML = `
+      <div class="toolbar-group">
+        <label>ตำบล:</label>
+        <select id="sel-rm-tambon">${tambonOptions}</select>
+      </div>
+      <div class="toolbar-group">
+        <label>หมู่บ้าน:</label>
+        <select id="sel-rm-village">${villageOptions}</select>
+      </div>
+      <div class="toolbar-group">
+        <input type="search" id="inp-rm-search" value="${escHtml(state.search)}" placeholder="🔍 ค้นหาชื่อเกษตรกร / เลขเอกสารสิทธิ์..." />
+      </div>
+      <div class="toolbar-group">
+        <select id="sel-rm-crop-filter">${cropFilterOptions}</select>
+      </div>
+      <div class="toolbar-group">
+        <label><input type="checkbox" id="chk-all-crops" ${state.showAllCrops ? 'checked' : ''} /> แสดงครบ 10 พืช</label>
+      </div>
+      <div class="toolbar-right">
+        <button class="btn btn-primary btn-sm" id="btn-add-plot">+ เพิ่มเกษตรกร / แปลง</button>
+        <button class="btn btn-secondary btn-sm" id="btn-export-current">📥 โหลด Excel แบบ รม.</button>
+        <button class="btn btn-outline btn-sm" id="btn-print">🖨️ พิมพ์ฟอร์ม รม.</button>
+      </div>
+    `;
+
+    $('official-header').innerHTML = `
+      <h2>แบบจัดเก็บข้อมูลการผลิตทางการเกษตรด้านพืชรายหมู่บ้าน หมู่ที่ ${village.moo} บ้าน${escHtml(village.name)} ตำบล${escHtml(tambon.name)} อำเภอ${escHtml(m.district)} จังหวัด${escHtml(m.province)} (รม.)</h2>
+      <p>ข้อมูล ณ วันที่ ${escHtml(m.reportDay)} เดือน ${escHtml(m.reportMonth)} พ.ศ. ${escHtml(m.reportYear)}</p>
+    `;
+
+    // Assign display farmer sequence numbers
+    const indexedPlots = [];
+    let farmerSeq = 0;
+    let prevFarmer = null;
+    village.plots.forEach((plot, origIdx) => {
+      const isNewFarmer = plot.f !== prevFarmer;
+      if (isNewFarmer) {
+        farmerSeq++;
+        prevFarmer = plot.f;
+      }
+      indexedPlots.push({
+        origIdx,
+        plot,
+        seqDisplay: isNewFarmer ? farmerSeq : '',
+        nameDisplay: isNewFarmer ? plot.f : '',
+        isNewFarmer,
+      });
+    });
+
+    // Apply search & crop filter
+    const q = state.search.trim().toLowerCase();
+    const filtered = indexedPlots.filter((item) => {
+      if (q) {
+        const matchName = (item.plot.f || '').toLowerCase().includes(q);
+        const matchDoc = (item.plot.d || '').toLowerCase().includes(q);
+        if (!matchName && !matchDoc) return false;
+      }
+      if (state.cropFilter !== 'all') {
+        if (!item.plot.c || !item.plot.c[state.cropFilter]) return false;
+      }
+      return true;
+    });
+
+    // Pagination
+    const totalFiltered = filtered.length;
+    const totalPages = state.pageSize === 0 ? 1 : Math.max(1, Math.ceil(totalFiltered / state.pageSize));
+    if (state.page > totalPages) state.page = totalPages;
+    const startIdx = state.pageSize === 0 ? 0 : (state.page - 1) * state.pageSize;
+    const pageItems = state.pageSize === 0 ? filtered : filtered.slice(startIdx, startIdx + state.pageSize);
+
+    const headers = renderCropTableHeaders(visibleCrops);
+    let bodyRows = '';
+
+    if (pageItems.length === 0) {
+      const totalCols = 6 + visibleCrops.reduce((acc, c) => acc + (c.hasCassavaSplit ? 7 : 5), 0);
+      bodyRows = `<tr><td colspan="${totalCols}" class="center" style="padding:28px;color:#64748b;">ไม่พบข้อมูลแปลงเกษตรกรที่ตรงกับเงื่อนไข</td></tr>`;
+    } else {
+      pageItems.forEach((item) => {
+        const p = item.plot;
+        const showName = q ? p.f : item.nameDisplay || `<span style="color:#94a3b8;font-size:12px;">↳ ${escHtml(p.f)}</span>`;
+        bodyRows += `
+          <tr>
+            <td class="center">${item.seqDisplay}</td>
+            <td class="farmer-name">${q ? escHtml(p.f) : item.isNewFarmer ? escHtml(p.f) : showName}</td>
+            <td class="center">${p.p || 1}</td>
+            <td class="center">${escHtml(p.d)}</td>
+            <td class="num">${fmtNum(p.a, 2)}</td>
+            ${renderCropCells(p.c, visibleCrops)}
+            <td class="center no-print">
+              <div class="action-btns">
+                <button class="btn btn-xs btn-outline" data-add-subplot="${item.origIdx}" title="เพิ่มแปลงต่อจากเกษตรกรรายนี้">+แปลง</button>
+                <button class="btn btn-xs btn-edit" data-edit-plot="${item.origIdx}">แก้ไข</button>
+                <button class="btn btn-xs btn-del" data-del-plot="${item.origIdx}">ลบ</button>
+              </div>
+            </td>
+          </tr>
+        `;
+      });
+    }
+
+    const totalRow = `
+      <tr class="total-row">
+        <td class="center" colspan="4">รวมทั้งหมด (${fmtNumZero(vs.farmersCount, 0)} ราย / ${fmtNumZero(vs.plotsCount, 0)} แปลง)</td>
+        <td class="num">${fmtNumZero(vs.totalArea, 2)}</td>
+        ${renderCropCells(vs.crops, visibleCrops)}
+        <td class="no-print"></td>
+      </tr>
+    `;
+
+    $('table-wrapper').innerHTML = `
+      <table class="agri-table">
+        <thead>
+          <tr>
+            <th rowspan="2">ลำดับที่</th>
+            <th rowspan="2">ชื่อ-สกุลเกษตรกร</th>
+            <th rowspan="2">แปลงที่</th>
+            <th rowspan="2">เลขเอกสารสิทธิ์<br>(ถ้ามี)</th>
+            <th rowspan="2">พื้นที่การเกษตร<br>(ไร่)</th>
+            ${headers.row1}
+            <th rowspan="2" class="no-print">จัดการ</th>
+          </tr>
+          <tr>${headers.row2}</tr>
+        </thead>
+        <tbody>
+          ${bodyRows}
+          ${totalRow}
+        </tbody>
+      </table>
+    `;
+
+    // Pagination bar
+    const pBar = $('pagination-bar');
+    pBar.hidden = false;
+    pBar.innerHTML = `
+      <div>แสดง <strong>${pageItems.length}</strong> จาก <strong>${totalFiltered}</strong> แปลง (หน้า ${state.page} / ${totalPages})</div>
+      <div class="pagination-controls">
+        <select id="sel-page-size" style="padding:4px 8px;border:1px solid #cbd5e1;border-radius:6px;font-family:inherit;">
+          <option value="50" ${state.pageSize === 50 ? 'selected' : ''}>50 แถว/หน้า</option>
+          <option value="100" ${state.pageSize === 100 ? 'selected' : ''}>100 แถว/หน้า</option>
+          <option value="0" ${state.pageSize === 0 ? 'selected' : ''}>แสดงทั้งหมด</option>
+        </select>
+        <button class="btn btn-outline btn-xs" id="btn-prev-page" ${state.page <= 1 ? 'disabled' : ''}>◀ ก่อนหน้า</button>
+        <button class="btn btn-outline btn-xs" id="btn-next-page" ${state.page >= totalPages ? 'disabled' : ''}>ถัดไป ▶</button>
+      </div>
+    `;
+
+    const signerName = village.signerName || '...................................................';
+    const signerPos = village.signerPosition || 'นักวิชาการส่งเสริมการเกษตร';
+    $('official-footer').innerHTML = `
+      <div class="sign-block">
+        <div>ลงชื่อ ............................................................</div>
+        <div>(${escHtml(signerName)})</div>
+        <div>ตำแหน่ง ${escHtml(signerPos)}</div>
+      </div>
+    `;
+
+    // Bind events
+    $('sel-rm-tambon').addEventListener('change', (e) => {
+      state.tambonId = e.target.value;
+      const t = getTambon(state.tambonId);
+      state.villageId = t.villages[0].id;
+      state.page = 1;
+      state.search = '';
+      render();
+    });
+    $('sel-rm-village').addEventListener('change', (e) => {
+      state.villageId = e.target.value;
+      state.page = 1;
+      state.search = '';
+      render();
+    });
+    $('inp-rm-search').addEventListener('input', (e) => {
+      state.search = e.target.value;
+      state.page = 1;
+      render();
+      const inp = $('inp-rm-search');
+      if (inp) {
+        inp.focus();
+        inp.setSelectionRange(inp.value.length, inp.value.length);
+      }
+    });
+    $('sel-rm-crop-filter').addEventListener('change', (e) => {
+      state.cropFilter = e.target.value;
+      state.page = 1;
+      render();
+    });
+    $('chk-all-crops').addEventListener('change', (e) => {
+      state.showAllCrops = e.target.checked;
+      render();
+    });
+    $('btn-add-plot').addEventListener('click', () => openPlotModal(-1));
+    $('btn-export-current').addEventListener('click', () => exportRMExcel(tambon, village));
+    $('btn-print').addEventListener('click', () => {
+      const prevSize = state.pageSize;
+      if (prevSize !== 0) {
+        state.pageSize = 0;
+        render();
+        setTimeout(() => {
+          window.print();
+          state.pageSize = prevSize;
+          render();
+        }, 120);
+      } else {
+        window.print();
+      }
+    });
+
+    $('sel-page-size').addEventListener('change', (e) => {
+      state.pageSize = Number(e.target.value);
+      state.page = 1;
+      render();
+    });
+    $('btn-prev-page').addEventListener('click', () => {
+      if (state.page > 1) {
+        state.page--;
+        render();
+      }
+    });
+    $('btn-next-page').addEventListener('click', () => {
+      if (state.page < totalPages) {
+        state.page++;
+        render();
+      }
+    });
+
+    // Row Actions
+    document.querySelectorAll('[data-edit-plot]').forEach((btn) => {
+      btn.addEventListener('click', () => openPlotModal(Number(btn.dataset.editPlot)));
+    });
+    document.querySelectorAll('[data-add-subplot]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const idx = Number(btn.dataset.addSubplot);
+        const existing = village.plots[idx];
+        // Find max plot no for this farmer
+        const sameFarmerPlots = village.plots.filter((x) => x.f === existing.f);
+        const nextPlotNo = sameFarmerPlots.reduce((mx, x) => Math.max(mx, Number(x.p || 1)), 0) + 1;
+        openPlotModal(-1, { prefillFarmer: existing.f, prefillPlotNo: nextPlotNo, insertAfterIdx: idx });
+      });
+    });
+    document.querySelectorAll('[data-del-plot]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const idx = Number(btn.dataset.delPlot);
+        const target = village.plots[idx];
+        if (confirm(`ยืนยันการลบข้อมูลแปลงที่ ${target.p} ของ "${target.f}" (${target.a} ไร่)?\nยอดรวมใน รม., รต. และ รอ. จะอัปเดตอัตโนมัติ`)) {
+          village.plots.splice(idx, 1);
+          saveData();
+          render();
+          showToast('🗑️ ลบข้อมูลแปลงเรียบร้อยแล้ว (อัปเดตยอด รต./รอ. แล้ว)');
+        }
+      });
+    });
+  }
+
+  // ========================
+  // PLOT ADD / EDIT MODAL
+  // ========================
+  let modalInsertAfterIdx = -1;
+
+  function populateModalLocationSelectors(selTambonId, selVillageId) {
+    const tSel = $('pf-tambon');
+    tSel.innerHTML = appData.tambons.map((t) => `<option value="${t.id}" ${t.id === selTambonId ? 'selected' : ''}>ตำบล${escHtml(t.name)}</option>`).join('');
+    const t = getTambon(selTambonId);
+    const vSel = $('pf-village');
+    vSel.innerHTML = t.villages.map((v) => `<option value="${v.id}" ${v.id === selVillageId ? 'selected' : ''}>หมู่ ${v.moo} บ้าน${escHtml(v.name)}</option>`).join('');
+
+    // Populate farmer autocomplete datalist
+    const v = getVillage(selTambonId, selVillageId);
+    const uniqueNames = [...new Set(v.plots.map((p) => p.f).filter(Boolean))];
+    $('farmer-datalist').innerHTML = uniqueNames.map((n) => `<option value="${escHtml(n)}"></option>`).join('');
+  }
+
+  function createCropBlockHTML(cropId, vals = {}) {
+    const crop = appData.crops.find((c) => c.id === cropId);
+    if (!crop) return '';
+    const n = vals.n || 0;
+    const s = vals.s || 0;
+    const h = vals.h || 0;
+    const ns = vals.ns || 0;
+    const ks = vals.ks || 0;
+    const y = vals.y !== undefined ? vals.y : crop.defaultYield || 0;
+    const p = vals.p || 0;
+
+    return `
+      <div class="crop-block" data-crop-id="${crop.id}">
+        <div class="crop-block-head">
+          <span class="crop-block-title">${crop.num}. ${escHtml(crop.name)} ${crop.variety ? `(${escHtml(crop.variety)})` : ''}</span>
+          <button type="button" class="btn btn-xs btn-del btn-remove-crop">ลบพืชนี้</button>
+        </div>
+        <div class="crop-fields-grid">
+          <div>
+            <label>ปลูกใหม่ (ไร่)</label>
+            <input type="number" step="0.01" min="0" class="cf-n" value="${n}" />
+          </div>
+          <div>
+            <label>ยืนต้น (ไร่)</label>
+            <input type="number" step="0.01" min="0" class="cf-s" value="${s}" />
+          </div>
+          <div>
+            <label>เก็บเกี่ยว (ไร่)</label>
+            <input type="number" step="0.01" min="0" class="cf-h" value="${h}" />
+          </div>
+          ${
+            crop.hasCassavaSplit
+              ? `
+          <div>
+            <label>ไม่เก็บท่อนพันธุ์ (ไร่)</label>
+            <input type="number" step="0.01" min="0" class="cf-ns" value="${ns}" />
+          </div>
+          <div>
+            <label>เก็บท่อนพันธุ์ (ไร่)</label>
+            <input type="number" step="0.01" min="0" class="cf-ks" value="${ks}" />
+          </div>`
+              : ''
+          }
+          <div>
+            <label>เฉลี่ย (กก./ไร่)</label>
+            <input type="number" step="1" min="0" class="cf-y" value="${y}" />
+          </div>
+          <div>
+            <label>ผลผลิตรวม (กก.)</label>
+            <input type="number" step="1" min="0" class="cf-p" value="${p}" />
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function bindCropBlockEvents(block) {
+    const recalc = () => {
+      const n = Number(block.querySelector('.cf-n').value || 0);
+      const s = Number(block.querySelector('.cf-s').value || 0);
+      const h = Number(block.querySelector('.cf-h').value || 0);
+      const y = Number(block.querySelector('.cf-y').value || 0);
+      const baseArea = h > 0 ? h : s > 0 ? s : n;
+      block.querySelector('.cf-p').value = Math.round(baseArea * y);
+    };
+    ['.cf-n', '.cf-s', '.cf-h', '.cf-y'].forEach((sel) => {
+      block.querySelector(sel).addEventListener('input', recalc);
+    });
+    block.querySelector('.btn-remove-crop').addEventListener('click', () => {
+      block.remove();
+    });
+  }
+
+  function openPlotModal(editIdx = -1, opts = {}) {
+    modalInsertAfterIdx = opts.insertAfterIdx !== undefined ? opts.insertAfterIdx : -1;
+    const isEdit = editIdx >= 0;
+    $('edit-plot-index').value = editIdx;
+    $('plot-modal-title').textContent = isEdit ? 'แก้ไขข้อมูลเกษตรกร / แปลงปลูก' : 'เพิ่มข้อมูลเกษตรกร / แปลงปลูกใหม่';
+
+    populateModalLocationSelectors(state.tambonId, state.villageId);
+    $('pf-tambon').disabled = isEdit;
+    $('pf-village').disabled = isEdit;
+
+    $('pf-add-crop-select').innerHTML = appData.crops
+      .map((c) => `<option value="${c.id}">${c.num}. ${escHtml(c.name)}</option>`)
+      .join('');
+
+    const cropsContainer = $('pf-crops-container');
+    cropsContainer.innerHTML = '';
+
+    if (isEdit) {
+      const v = getVillage(state.tambonId, state.villageId);
+      const plot = v.plots[editIdx];
+      $('pf-farmer').value = plot.f || '';
+      $('pf-plotno').value = plot.p || 1;
+      $('pf-docno').value = plot.d || '';
+      $('pf-area').value = plot.a || 0;
+
+      const cKeys = plot.c ? Object.keys(plot.c) : [];
+      if (cKeys.length > 0) {
+        cKeys.forEach((cid) => {
+          cropsContainer.insertAdjacentHTML('beforeend', createCropBlockHTML(cid, plot.c[cid]));
+        });
+      } else {
+        cropsContainer.insertAdjacentHTML('beforeend', createCropBlockHTML('rice', { s: plot.a || 0, y: 400, p: Math.round((plot.a || 0) * 400) }));
+      }
+    } else {
+      $('pf-farmer').value = opts.prefillFarmer || '';
+      $('pf-plotno').value = opts.prefillPlotNo || 1;
+      $('pf-docno').value = '';
+      $('pf-area').value = 0;
+      cropsContainer.insertAdjacentHTML('beforeend', createCropBlockHTML('rice', { s: 0, y: 400, p: 0 }));
+    }
+
+    cropsContainer.querySelectorAll('.crop-block').forEach(bindCropBlockEvents);
+    $('plot-modal').hidden = false;
+    $('pf-farmer').focus();
+  }
+
+  // ========================
+  // EXCEL EXPORT (OFFICIAL FORMAT รอ. / รต. / รม.)
+  // ========================
+  function buildOfficialCropHeaderRows(prefixColsCount, isROorRT) {
+    const row1 = new Array(prefixColsCount).fill('');
+    const row2 = new Array(prefixColsCount).fill('');
+    const merges = [];
+
+    if (isROorRT === 'ro') {
+      row1[0] = 'ที่';
+      row1[1] = 'ตำบล';
+      row1[2] = 'ครัวเรือนเกษตรกร (ราย)';
+      row1[3] = 'พื้นที่การเกษตร(ไร่)';
+    } else if (isROorRT === 'rt') {
+      row1[0] = 'หมู่ที่';
+      row1[1] = 'ชื่อหมู่บ้าน';
+      row1[2] = 'ครัวเรือนเกษตรกร (ราย)';
+      row1[3] = 'พื้นที่การเกษตร(ไร่)';
+    } else {
+      row1[0] = 'ลำดับที่';
+      row1[1] = 'ชื่อ-สกุลเกษตรกร';
+      row1[2] = 'แปลงที่';
+      row1[3] = 'เลขเอกสารสิทธิ์ (ถ้ามี)';
+      row1[4] = 'พื้นที่การเกษตร(ไร่)';
+    }
+
+    // Merge prefix header rows vertically (rows 3..4 in 0-based index)
+    for (let c = 0; c < prefixColsCount; c++) {
+      merges.push({ s: { r: 3, c }, e: { r: 4, c } });
+    }
+
+    let col = prefixColsCount;
+    appData.crops.forEach((crop) => {
+      const span = crop.hasCassavaSplit ? 7 : 5;
+      const label = `${crop.num}. ชนิดพืช ${crop.name} /พันธุ์ ${crop.variety || '................................'}`;
+      row1.push(label);
+      for (let i = 1; i < span; i++) row1.push('');
+      merges.push({ s: { r: 3, c: col }, e: { r: 3, c: col + span - 1 } });
+
+      if (crop.hasCassavaSplit) {
+        row2.push(
+          'พื้นที่ปลูกใหม่(ไร่)',
+          'พื้นที่ยืนต้น(ไร่)',
+          'พื้นที่เก็บเกี่ยว(ไร่)',
+          'ไม่เก็บท่อนพันธุ์ไว้ใช้ต่อ (ไร่)',
+          'เก็บท่อนพันธุ์ไว้ใช้ต่อ (ไร่)',
+          'ผลผลิตรวม (กก.)',
+          'ผลผลิตเฉลี่ย (กก./ไร่)'
+        );
+      } else {
+        row2.push(
+          'พื้นที่ปลูกใหม่(ไร่)',
+          'พื้นที่ยืนต้น(ไร่)',
+          'พื้นที่เก็บเกี่ยว(ไร่)',
+          'ผลผลิตรวม (กก.)',
+          'ผลผลิตเฉลี่ย (กก./ไร่)'
+        );
+      }
+      col += span;
+    });
+
+    return { row1, row2, merges, totalCols: col };
+  }
+
+  function cropObjToRowCells(cropsObj) {
+    const arr = [];
+    appData.crops.forEach((crop) => {
+      const cv = (cropsObj && cropsObj[crop.id]) || null;
+      if (crop.hasCassavaSplit) {
+        arr.push(
+          cv && cv.n ? cv.n : '',
+          cv && cv.s ? cv.s : '',
+          cv && cv.h ? cv.h : '',
+          cv && cv.ns ? cv.ns : '',
+          cv && cv.ks ? cv.ks : '',
+          cv && cv.p ? cv.p : '',
+          cv && cv.y ? cv.y : ''
+        );
+      } else {
+        arr.push(
+          cv && cv.n ? cv.n : '',
+          cv && cv.s ? cv.s : '',
+          cv && cv.h ? cv.h : '',
+          cv && cv.p ? cv.p : '',
+          cv && cv.y ? cv.y : ''
+        );
+      }
+    });
+    return arr;
+  }
+
+  function createROSheet() {
+    const dist = summarizeDistrict();
+    const m = appData.meta;
+    const hdr = buildOfficialCropHeaderRows(4, 'ro');
+    const aoa = [
+      [`แบบจัดเก็บข้อมูลการผลิตทางการเกษตรด้านพืชรายอำเภอ ${m.district} จังหวัด${m.province} (รอ.)`],
+      [`ข้อมูล ณ วันที่ ${m.reportDay} เดือน ${m.reportMonth} พ.ศ. ${m.reportYear}`],
+      [],
+      hdr.row1,
+      hdr.row2,
+    ];
+    dist.tambonSummaries.forEach((item, idx) => {
+      aoa.push([
+        idx + 1,
+        item.tambon.name,
+        item.summary.farmersCount,
+        item.summary.totalArea,
+        ...cropObjToRowCells(item.summary.crops),
+      ]);
+    });
+    aoa.push([]);
+    aoa.push(['รวม', '', dist.farmersCount, dist.totalArea, ...cropObjToRowCells(dist.crops)]);
+    aoa.push([]);
+    aoa.push(['ลงชื่อ..................................']);
+    aoa.push([`(${m.districtOfficer})`]);
+    aoa.push([`ตำแหน่ง ${m.districtPosition}`]);
+
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!merges'] = hdr.merges;
+    return ws;
+  }
+
+  function createRTSheet(tambon) {
+    const ts = summarizeTambon(tambon);
+    const m = appData.meta;
+    const hdr = buildOfficialCropHeaderRows(4, 'rt');
+    const aoa = [
+      [`แบบจัดเก็บข้อมูลการผลิตทางการเกษตรด้านพืชรายตำบล ${tambon.name} อำเภอ ${m.district} จังหวัด${m.province} (รต.)`],
+      [`ข้อมูล ณ วันที่ ${m.reportDay} เดือน ${m.reportMonth} พ.ศ. ${m.reportYear}`],
+      [],
+      hdr.row1,
+      hdr.row2,
+    ];
+    ts.villageSummaries.forEach((item) => {
+      aoa.push([
+        item.village.moo,
+        item.village.name,
+        item.summary.farmersCount,
+        item.summary.totalArea,
+        ...cropObjToRowCells(item.summary.crops),
+      ]);
+    });
+    aoa.push([]);
+    aoa.push(['รวม', '', ts.farmersCount, ts.totalArea, ...cropObjToRowCells(ts.crops)]);
+    aoa.push([]);
+    aoa.push(['ลงชื่อ..................................']);
+    aoa.push([`(${m.districtOfficer})`]);
+    aoa.push([`ตำแหน่ง ${m.districtPosition}`]);
+
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!merges'] = hdr.merges;
+    return ws;
+  }
+
+  function createRMSheet(tambon, village) {
+    const vs = summarizeVillage(village);
+    const m = appData.meta;
+    const hdr = buildOfficialCropHeaderRows(5, 'rm');
+    const aoa = [
+      [`แบบจัดเก็บข้อมูลการผลิตทางการเกษตรด้านพืชรายหมู่บ้าน หมู่ที่ ${village.moo} บ้าน${village.name} ตำบล${tambon.name} อำเภอ${m.district} จังหวัด${m.province} (รม.)`],
+      [`ข้อมูล ณ วันที่ ${m.reportDay} เดือน ${m.reportMonth} พ.ศ. ${m.reportYear}`],
+      [],
+      hdr.row1,
+      hdr.row2,
+    ];
+    let seq = 0;
+    let prev = null;
+    village.plots.forEach((p) => {
+      const isNew = p.f !== prev;
+      if (isNew) {
+        seq++;
+        prev = p.f;
+      }
+      aoa.push([
+        isNew ? seq : '',
+        isNew ? p.f : '',
+        p.p || 1,
+        p.d || '',
+        p.a || 0,
+        ...cropObjToRowCells(p.c),
+      ]);
+    });
+    aoa.push([]);
+    aoa.push(['รวม', '', '', '', vs.totalArea, ...cropObjToRowCells(vs.crops)]);
+    aoa.push([]);
+    aoa.push([`ลงชื่อ ${village.signerName || '..................................'}`]);
+    aoa.push([`(${village.signerName || '..................................'})`]);
+    aoa.push([`ตำแหน่ง ${village.signerPosition || 'นักวิชาการส่งเสริมการเกษตร'}`]);
+
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!merges'] = hdr.merges;
+    return ws;
+  }
+
+  function safeSheetName(name, used) {
+    let clean = name.replace(/[\\/?*[\]:]/g, '').trim().slice(0, 31);
+    let candidate = clean;
+    let i = 2;
+    while (used.has(candidate)) {
+      candidate = clean.slice(0, 28) + '_' + i++;
+    }
+    used.add(candidate);
+    return candidate;
+  }
+
+  function exportROExcel() {
+    if (typeof XLSX === 'undefined') return alert('ไม่พบไลบรารี SheetJS กรุณาเชื่อมต่ออินเทอร์เน็ต');
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, createROSheet(), 'อำเภอสีดา (รอ.)');
+    XLSX.writeFile(wb, `แบบ_รอ_อำเภอสีดา.xlsx`);
+    showToast('📊 ดาวน์โหลดแบบ รอ. สำเร็จ');
+  }
+
+  function exportRTExcel(tambon) {
+    if (typeof XLSX === 'undefined') return alert('ไม่พบไลบรารี SheetJS กรุณาเชื่อมต่ออินเทอร์เน็ต');
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, createRTSheet(tambon), `ต.${tambon.name}`.slice(0, 31));
+    XLSX.writeFile(wb, `แบบ_รต_ตำบล${tambon.name}.xlsx`);
+    showToast(`📊 ดาวน์โหลดแบบ รต. ตำบล${tambon.name} สำเร็จ`);
+  }
+
+  function exportRMExcel(tambon, village) {
+    if (typeof XLSX === 'undefined') return alert('ไม่พบไลบรารี SheetJS กรุณาเชื่อมต่ออินเทอร์เน็ต');
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, createRMSheet(tambon, village), `หมู่${village.moo}_${village.name}`.slice(0, 31));
+    XLSX.writeFile(wb, `แบบ_รม_หมู่${village.moo}_${village.name}_ต.${tambon.name}.xlsx`);
+    showToast(`📊 ดาวน์โหลดแบบ รม. บ้าน${village.name} สำเร็จ`);
+  }
+
+  function exportAllWorkbookExcel() {
+    if (typeof XLSX === 'undefined') return alert('ไม่พบไลบรารี SheetJS กรุณาเชื่อมต่ออินเทอร์เน็ต');
+    showToast('⏳ กำลังสร้างไฟล์ Excel ทั้ง 56 ชีต...');
+    setTimeout(() => {
+      const wb = XLSX.utils.book_new();
+      const used = new Set();
+      XLSX.utils.book_append_sheet(wb, createROSheet(), safeSheetName('อำเภอสีดา', used));
+      appData.tambons.forEach((t) => {
+        XLSX.utils.book_append_sheet(wb, createRTSheet(t), safeSheetName(`ตำบล${t.name}`, used));
+        t.villages.forEach((v) => {
+          XLSX.utils.book_append_sheet(wb, createRMSheet(t, v), safeSheetName(`ม.${v.moo} ${v.name}`, used));
+        });
+      });
+      XLSX.writeFile(wb, `แบบจัดเก็บข้อมูลด้านพืช_อำเภอสีดา_ครบทุกชีต.xlsx`);
+      showToast('✅ ดาวน์โหลดไฟล์ Excel ครบ 56 ชีตเรียบร้อย!');
+    }, 80);
+  }
+
+  // ========================
+  // NAVIGATION & RENDER
+  // ========================
+  function switchView(viewName) {
+    state.view = viewName;
+    document.querySelectorAll('.nav-tab').forEach((tab) => {
+      tab.classList.toggle('active', tab.dataset.view === viewName);
+    });
+    render();
+  }
+
+  function render() {
+    updateHeaderDate();
+    if (state.view === 'ro') renderViewRO();
+    else if (state.view === 'rt') renderViewRT();
+    else renderViewRM();
+  }
+
+  // ========================
+  // INITIALIZE & GLOBAL EVENTS
+  // ========================
+  function showApp() {
+    $('login-screen').hidden = true;
+    $('app-shell').hidden = false;
+    render();
+  }
+
+  function init() {
+    loadData();
+
+    // Auth check
+    if (sessionStorage.getItem(AUTH_SESSION_KEY) === '1') {
+      showApp();
+    }
+
+    $('login-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const val = $('pin-input').value.trim();
+      if (val === ACCESS_PIN) {
+        sessionStorage.setItem(AUTH_SESSION_KEY, '1');
+        $('login-error').hidden = true;
+        showApp();
+      } else {
+        $('login-error').hidden = false;
+        $('pin-input').value = '';
+        $('pin-input').focus();
+      }
+    });
+
+    $('btn-logout').addEventListener('click', () => {
+      sessionStorage.removeItem(AUTH_SESSION_KEY);
+      $('app-shell').hidden = true;
+      $('login-screen').hidden = false;
+      $('pin-input').value = '';
+      $('pin-input').focus();
+    });
+
+    // Nav tabs
+    document.querySelectorAll('.nav-tab').forEach((tab) => {
+      tab.addEventListener('click', () => switchView(tab.dataset.view));
+    });
+
+    // Close modals
+    document.querySelectorAll('[data-close]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        $(btn.dataset.close).hidden = true;
+      });
+    });
+
+    // Plot modal: tambon change updates village list
+    $('pf-tambon').addEventListener('change', (e) => {
+      const t = getTambon(e.target.value);
+      populateModalLocationSelectors(t.id, t.villages[0].id);
+    });
+
+    // Plot modal: sync area -> first crop's standing area if 0
+    $('pf-area').addEventListener('input', (e) => {
+      const val = Number(e.target.value || 0);
+      const firstBlock = $('pf-crops-container').querySelector('.crop-block');
+      if (firstBlock && Number($('edit-plot-index').value) < 0) {
+        const sInp = firstBlock.querySelector('.cf-s');
+        const hInp = firstBlock.querySelector('.cf-h');
+        const nInp = firstBlock.querySelector('.cf-n');
+        if (Number(hInp.value || 0) === 0 && Number(nInp.value || 0) === 0) {
+          sInp.value = Math.floor(val);
+          sInp.dispatchEvent(new Event('input'));
+        }
+      }
+    });
+
+    // Add crop block button
+    $('btn-add-crop-block').addEventListener('click', () => {
+      const cid = $('pf-add-crop-select').value;
+      const container = $('pf-crops-container');
+      if (container.querySelector(`[data-crop-id="${cid}"]`)) {
+        showToast('มีชนิดพืชนี้อยู่ในแปลงแล้ว');
+        return;
+      }
+      container.insertAdjacentHTML('beforeend', createCropBlockHTML(cid));
+      bindCropBlockEvents(container.lastElementChild);
+    });
+
+    // Submit Plot Form
+    $('plot-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const editIdx = Number($('edit-plot-index').value);
+      const tId = $('pf-tambon').value;
+      const vId = $('pf-village').value;
+      const village = getVillage(tId, vId);
+
+      const cropsObj = {};
+      $('pf-crops-container')
+        .querySelectorAll('.crop-block')
+        .forEach((blk) => {
+          const cid = blk.dataset.cropId;
+          const cropDef = appData.crops.find((c) => c.id === cid);
+          const n = round4(blk.querySelector('.cf-n').value);
+          const s = round4(blk.querySelector('.cf-s').value);
+          const h = round4(blk.querySelector('.cf-h').value);
+          const p = round4(blk.querySelector('.cf-p').value);
+          const y = round4(blk.querySelector('.cf-y').value);
+          if (cropDef && cropDef.hasCassavaSplit) {
+            const ns = round4(blk.querySelector('.cf-ns').value);
+            const ks = round4(blk.querySelector('.cf-ks').value);
+            if (n || s || h || ns || ks || p || y) {
+              cropsObj[cid] = { n, s, h, ns, ks, p, y };
+            }
+          } else {
+            if (n || s || h || p || y) {
+              cropsObj[cid] = { n, s, h, p, y };
+            }
+          }
+        });
+
+      const newPlot = {
+        f: $('pf-farmer').value.trim(),
+        p: Number($('pf-plotno').value || 1),
+        d: $('pf-docno').value.trim(),
+        a: round4($('pf-area').value),
+        c: cropsObj,
+      };
+
+      if (editIdx >= 0) {
+        village.plots[editIdx] = newPlot;
+        showToast('✅ แก้ไขข้อมูลเรียบร้อย (อัปเดต รต. และ รอ. แล้ว)');
+      } else if (modalInsertAfterIdx >= 0) {
+        village.plots.splice(modalInsertAfterIdx + 1, 0, newPlot);
+        showToast('✅ เพิ่มแปลงต่อจากเกษตรกรรายเดิมเรียบร้อย');
+      } else {
+        village.plots.push(newPlot);
+        showToast('✅ เพิ่มข้อมูลเกษตรกรใหม่เรียบร้อย (อัปเดต รต. และ รอ. แล้ว)');
+      }
+
+      state.tambonId = tId;
+      state.villageId = vId;
+      saveData();
+      $('plot-modal').hidden = true;
+      render();
+    });
+
+    // Meta Settings Modal
+    $('btn-edit-meta').addEventListener('click', () => {
+      const m = appData.meta;
+      $('meta-day').value = m.reportDay;
+      $('meta-month').value = m.reportMonth;
+      $('meta-year').value = m.reportYear;
+      $('meta-district-officer').value = m.districtOfficer;
+      $('meta-district-pos').value = m.districtPosition;
+
+      const vFields = $('village-signer-fields');
+      if (state.view === 'rm') {
+        const v = getVillage(state.tambonId, state.villageId);
+        vFields.hidden = false;
+        $('meta-village-officer').value = v.signerName || '';
+        $('meta-village-pos').value = v.signerPosition || '';
+      } else {
+        vFields.hidden = true;
+      }
+      $('meta-modal').hidden = false;
+    });
+
+    $('meta-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      appData.meta.reportDay = $('meta-day').value.trim();
+      appData.meta.reportMonth = $('meta-month').value.trim();
+      appData.meta.reportYear = $('meta-year').value.trim();
+      appData.meta.districtOfficer = $('meta-district-officer').value.trim();
+      appData.meta.districtPosition = $('meta-district-pos').value.trim();
+      if (state.view === 'rm') {
+        const v = getVillage(state.tambonId, state.villageId);
+        v.signerName = $('meta-village-officer').value.trim();
+        v.signerPosition = $('meta-village-pos').value.trim();
+      }
+      saveData();
+      $('meta-modal').hidden = true;
+      render();
+      showToast('⚙️ บันทึกการตั้งค่าแบบฟอร์มเรียบร้อย');
+    });
+
+    // Export All 56 Sheets
+    $('btn-export-all-xlsx').addEventListener('click', exportAllWorkbookExcel);
+
+    // Backup / Restore Modal
+    $('btn-backup').addEventListener('click', () => {
+      $('backup-modal').hidden = false;
+    });
+
+    $('btn-download-json').addEventListener('click', () => {
+      const blob = new Blob([JSON.stringify(appData, null, 2)], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `backup_sida_agri_${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('💾 ดาวน์โหลดไฟล์สำรองข้อมูลเรียบร้อย');
+    });
+
+    $('input-import-json').addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const parsed = JSON.parse(reader.result);
+          if (!parsed.tambons || !parsed.crops) throw new Error('โครงสร้างไฟล์ไม่ถูกต้อง');
+          appData = parsed;
+          saveData();
+          $('backup-modal').hidden = true;
+          render();
+          showToast('✅ นำเข้าข้อมูลสำรองเรียบร้อยแล้ว');
+        } catch (err) {
+          alert('ไม่สามารถนำเข้าไฟล์ได้: ' + err.message);
+        }
+      };
+      reader.readAsText(file, 'utf-8');
+      e.target.value = '';
+    });
+
+    $('btn-reset-data').addEventListener('click', () => {
+      if (confirm('ยืนยันรีเซ็ตข้อมูลทั้งหมดกลับไปเป็นข้อมูลตั้งต้นจากไฟล์ Excel?\n(การแก้ไขที่บันทึกไว้ในเครื่องนี้จะถูกล้าง)')) {
+        localStorage.removeItem(STORAGE_KEY);
+        appData = JSON.parse(JSON.stringify(window.INITIAL_AGRI_DATA));
+        $('backup-modal').hidden = true;
+        render();
+        showToast('🔄 รีเซ็ตข้อมูลกลับเป็นค่าตั้งต้นเรียบร้อย');
+      }
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', init);
+})();

@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ระบบจัดเก็บข้อมูลการผลิตทางการเกษตรด้านพืช อำเภอสีดา (รอ./รต./รม.)</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <!-- SheetJS for official Excel (.xlsx) export -->
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+  <!-- LOGIN SCREEN -->
+  <div id="login-screen" class="login-overlay">
+    <div class="login-card">
+      <div class="login-badge">สำนักงานเกษตรอำเภอสีดา จังหวัดนครราชสีมา</div>
+      <div class="login-icon">🌾</div>
+      <h1>ระบบจัดเก็บข้อมูลการผลิตด้านพืช</h1>
+      <p class="login-subtitle">แบบฟอร์ม รอ. (รายอำเภอ) • รต. (รายตำบล) • รม. (รายหมู่บ้าน)</p>
+      <form id="login-form" autocomplete="off">
+        <label for="pin-input" class="form-label">กรุณากรอกรหัสผ่านเข้าใช้งาน</label>
+        <input
+          type="password"
+          id="pin-input"
+          class="pin-input"
+          placeholder="••••••"
+          maxlength="12"
+          inputmode="numeric"
+          autofocus
+          required
+        />
+        <div id="login-error" class="login-error" hidden>รหัสผ่านไม่ถูกต้อง กรุณาลองใหม่อีกครั้ง</div>
+        <button type="submit" class="btn btn-primary btn-block btn-lg">เข้าสู่ระบบ</button>
+      </form>
+      <p class="login-hint">ข้อมูลเชื่อมโยงอัตโนมัติจาก รม. → รต. → รอ. พร้อมส่งออกฟอร์ม Excel และสั่งพิมพ์</p>
+    </div>
+  </div>
+
+  <!-- MAIN APPLICATION -->
+  <div id="app-shell" class="app-shell" hidden>
+    <!-- TOP BAR -->
+    <header class="topbar no-print">
+      <div class="topbar-left">
+        <div class="brand-logo">🌾</div>
+        <div>
+          <div class="brand-title">ระบบข้อมูลการผลิตด้านพืช อำเภอสีดา</div>
+          <div class="brand-sub" id="topbar-date-info">ข้อมูล ณ วันที่ 21 ตุลาคม พ.ศ. 2569 • เชื่อมโยง รม. → รต. → รอ. อัตโนมัติ</div>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <button class="btn btn-outline btn-sm" id="btn-edit-meta" title="แก้ไขวันที่/ผู้ลงนาม">⚙️ ตั้งค่าฟอร์ม</button>
+        <button class="btn btn-outline btn-sm" id="btn-export-all-xlsx" title="ดาวน์โหลด Excel ทั้ง 56 ชีต (รอ./รต./รม.)">📊 โหลด Excel ทั้งหมด</button>
+        <button class="btn btn-outline btn-sm" id="btn-backup" title="สำรอง/กู้คืนข้อมูล">💾 สำรองข้อมูล</button>
+        <button class="btn btn-danger-outline btn-sm" id="btn-logout">ออกจากระบบ</button>
+      </div>
+    </header>
+
+    <!-- NAVIGATION TABS -->
+    <nav class="nav-tabs no-print">
+      <button class="nav-tab active" data-view="ro">🏛️ แบบ รอ. (รายอำเภอ)</button>
+      <button class="nav-tab" data-view="rt">🏘️ แบบ รต. (รายตำบล)</button>
+      <button class="nav-tab" data-view="rm">🏡 แบบ รม. (รายหมู่บ้าน / เพิ่ม-ลบ-แก้ไข)</button>
+      <div class="nav-spacer"></div>
+      <div class="save-indicator" id="save-indicator">✓ บันทึกอัตโนมัติในเครื่องแล้ว</div>
+    </nav>
+
+    <!-- SUMMARY KPI CARDS -->
+    <section class="kpi-strip no-print" id="kpi-strip">
+      <div class="kpi-card">
+        <div class="kpi-label">ครัวเรือนเกษตรกร</div>
+        <div class="kpi-value" id="kpi-farmers">0</div>
+        <div class="kpi-unit">ราย</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">จำนวนแปลงทั้งหมด</div>
+        <div class="kpi-value" id="kpi-plots">0</div>
+        <div class="kpi-unit">แปลง</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">พื้นที่การเกษตรรวม</div>
+        <div class="kpi-value" id="kpi-area">0</div>
+        <div class="kpi-unit">ไร่</div>
+      </div>
+      <div class="kpi-card highlight">
+        <div class="kpi-label">ผลผลิตข้าวรวม</div>
+        <div class="kpi-value" id="kpi-rice-prod">0</div>
+        <div class="kpi-unit">กก.</div>
+      </div>
+      <div class="kpi-card accent">
+        <div class="kpi-label">พืชอื่นๆ (ไร่รวม)</div>
+        <div class="kpi-value" id="kpi-other-area">0</div>
+        <div class="kpi-unit">ไร่</div>
+      </div>
+    </section>
+
+    <!-- VIEW CONTROLS TOOLBAR -->
+    <section class="toolbar no-print" id="toolbar">
+      <!-- Dynamic controls injected by JS per view -->
+    </section>
+
+    <!-- FORM PAPER VIEW (PRINTABLE & SCREEN) -->
+    <main class="main-content">
+      <div class="form-paper" id="form-paper">
+        <div class="official-header" id="official-header"></div>
+        <div class="table-wrapper" id="table-wrapper"></div>
+        <div class="pagination-bar no-print" id="pagination-bar" hidden></div>
+        <div class="official-footer" id="official-footer"></div>
+      </div>
+    </main>
+  </div>
+
+  <!-- MODAL: ADD / EDIT FARMER PLOT -->
+  <div id="plot-modal" class="modal-backdrop" hidden>
+    <div class="modal-dialog modal-lg">
+      <div class="modal-header">
+        <h2 id="plot-modal-title">เพิ่มข้อมูลเกษตรกร / แปลงปลูก</h2>
+        <button class="modal-close" data-close="plot-modal">&times;</button>
+      </div>
+      <form id="plot-form">
+        <div class="modal-body">
+          <input type="hidden" id="edit-plot-index" value="-1" />
+          <div class="form-grid-3">
+            <div class="form-group">
+              <label>ตำบล</label>
+              <select id="pf-tambon" required></select>
+            </div>
+            <div class="form-group">
+              <label>หมู่บ้าน</label>
+              <select id="pf-village" required></select>
+            </div>
+            <div class="form-group">
+              <label>แปลงที่</label>
+              <input type="number" id="pf-plotno" min="1" value="1" required />
+            </div>
+          </div>
+          <div class="form-grid-3">
+            <div class="form-group span-2">
+              <label>ชื่อ-สกุลเกษตรกร *</label>
+              <input type="text" id="pf-farmer" list="farmer-datalist" placeholder="เช่น นายสมชาย ใจดี" required />
+              <datalist id="farmer-datalist"></datalist>
+            </div>
+            <div class="form-group">
+              <label>เลขเอกสารสิทธิ์ (ถ้ามี)</label>
+              <input type="text" id="pf-docno" placeholder="เช่น 12345" />
+            </div>
+          </div>
+          <div class="form-grid-3">
+            <div class="form-group">
+              <label>พื้นที่การเกษตร (ไร่) *</label>
+              <input type="number" id="pf-area" step="0.0001" min="0" value="0" required />
+            </div>
+            <div class="form-group span-2">
+              <label>คำแนะนำการกรอกพืช</label>
+              <div class="info-pill">เลือกชนิดพืชด้านล่างเพื่อกรอกข้อมูล ระบบคำนวณ <strong>ผลผลิตรวม (กก.)</strong> อัตโนมัติ และลิงค์ไป รต. / รอ. ทันที</div>
+            </div>
+          </div>
+
+          <hr class="divider" />
+          <div class="crops-editor-header">
+            <h3>รายการชนิดพืชในแปลงนี้</h3>
+            <div class="crop-add-row">
+              <select id="pf-add-crop-select"></select>
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-add-crop-block">+ เพิ่มชนิดพืช</button>
+            </div>
+          </div>
+          <div id="pf-crops-container" class="crops-container"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline" data-close="plot-modal">ยกเลิก</button>
+          <button type="submit" class="btn btn-primary">💾 บันทึกข้อมูล</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: SETTINGS / META -->
+  <div id="meta-modal" class="modal-backdrop" hidden>
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h2>ตั้งค่าหัวแบบฟอร์มและผู้ลงนาม</h2>
+        <button class="modal-close" data-close="meta-modal">&times;</button>
+      </div>
+      <form id="meta-form">
+        <div class="modal-body">
+          <div class="form-grid-3">
+            <div class="form-group">
+              <label>ข้อมูล ณ วันที่</label>
+              <input type="text" id="meta-day" required />
+            </div>
+            <div class="form-group">
+              <label>เดือน</label>
+              <input type="text" id="meta-month" required />
+            </div>
+            <div class="form-group">
+              <label>พ.ศ.</label>
+              <input type="text" id="meta-year" required />
+            </div>
+          </div>
+          <div class="form-grid-2">
+            <div class="form-group">
+              <label>ชื่อผู้ลงนาม (รอ. / รต.)</label>
+              <input type="text" id="meta-district-officer" required />
+            </div>
+            <div class="form-group">
+              <label>ตำแหน่ง (รอ. / รต.)</label>
+              <input type="text" id="meta-district-pos" required />
+            </div>
+          </div>
+          <div class="form-grid-2" id="village-signer-fields" hidden>
+            <div class="form-group">
+              <label>ผู้ลงนามประจำหมู่บ้านปัจจุบัน (รม.)</label>
+              <input type="text" id="meta-village-officer" />
+            </div>
+            <div class="form-group">
+              <label>ตำแหน่งผู้ลงนาม (รม.)</label>
+              <input type="text" id="meta-village-pos" />
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline" data-close="meta-modal">ยกเลิก</button>
+          <button type="submit" class="btn btn-primary">บันทึกการตั้งค่า</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: BACKUP / RESTORE -->
+  <div id="backup-modal" class="modal-backdrop" hidden>
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h2>สำรองและกู้คืนข้อมูล</h2>
+        <button class="modal-close" data-close="backup-modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="backup-desc">ข้อมูลที่แก้ไขจะถูกบันทึกอัตโนมัติในเบราว์เซอร์เครื่องนี้ คุณสามารถส่งออกไฟล์ JSON เพื่อนำไปเปิดเครื่องอื่น หรือรีเซ็ตกลับไปใช้ข้อมูลตั้งต้นจากไฟล์ Excel ได้</p>
+        <div class="backup-actions">
+          <button class="btn btn-primary" id="btn-download-json">⬇️ ดาวน์โหลดไฟล์สำรอง (.json)</button>
+          <label class="btn btn-secondary file-btn">
+            ⬆️ นำเข้าไฟล์สำรอง (.json)
+            <input type="file" id="input-import-json" accept=".json" hidden />
+          </label>
+          <hr class="divider" />
+          <button class="btn btn-danger-outline" id="btn-reset-data">🔄 รีเซ็ตกลับข้อมูลตั้งต้นทั้งหมด</button>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline" data-close="backup-modal">ปิด</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOAST NOTIFICATION -->
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="data/initial-data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
