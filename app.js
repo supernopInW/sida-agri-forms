@@ -348,8 +348,127 @@
       </div>
       <div class="toolbar-right">
         <button class="btn btn-primary btn-sm" id="btn-dash-add">+ เพิ่มเกษตรกร / แปลง (รม.)</button>
-        <button class="btn btn-secondary btn-sm" id="btn-dash-goto-ro">🏛️ เปิดแบบ รอ.</button>
+        <button class="btn btn-secondary btn-sm" id="btn-dash-present">🖥️ โหมดนำเสนอ</button>
+        <button class="btn btn-outline btn-sm" id="btn-dash-goto-ro">🏛️ เปิดแบบ รอ.</button>
         <button class="btn btn-outline btn-sm" id="btn-dash-print">🖨️ พิมพ์แดชบอร์ด</button>
+      </div>
+    `;
+
+    // Executive Summary & Easy-to-understand Narrative
+    const m = appData.meta;
+    const scopeTitle = isDistrict
+      ? `อำเภอ${m.district} จังหวัด${m.province} (${appData.tambons.length} ตำบล / ${appData.tambons.reduce((a, t) => a + t.villages.length, 0)} หมู่บ้าน)`
+      : `ตำบล${activeTambon.name} อำเภอ${m.district} (${activeTambon.villages.length} หมู่บ้าน)`;
+
+    const avgAreaPerFarmer = activeSummary.farmersCount > 0 ? activeSummary.totalArea / activeSummary.farmersCount : 0;
+    const avgPlotsPerFarmer = activeSummary.farmersCount > 0 ? activeSummary.plotsCount / activeSummary.farmersCount : 0;
+
+    const rice = activeSummary.crops.rice;
+    const riceTotalArea = round4((rice.n || 0) + (rice.s || 0) + (rice.h || 0));
+    const riceHarvestPct = riceTotalArea > 0 ? Math.round((rice.h / riceTotalArea) * 1000) / 10 : 0;
+    const riceStandingPct = riceTotalArea > 0 ? Math.round((rice.s / riceTotalArea) * 1000) / 10 : 0;
+    const riceNewPct = riceTotalArea > 0 ? Math.max(0, Math.round((100 - riceHarvestPct - riceStandingPct) * 10) / 10) : 0;
+    const riceTons = rice.p / 1000;
+
+    // Identify secondary crops with data
+    const otherCropsList = appData.crops
+      .filter((c) => c.id !== 'rice')
+      .map((c) => {
+        const a = activeSummary.crops[c.id];
+        const area = round4((a.n || 0) + (a.s || 0) + (a.h || 0));
+        return { crop: c, area, prod: a.p || 0, tons: (a.p || 0) / 1000 };
+      })
+      .filter((x) => x.area > 0 || x.prod > 0);
+
+    const otherCropsSummaryText =
+      otherCropsList.length > 0
+        ? otherCropsList.map((x) => `${x.crop.name} ${fmtNumZero(x.area, 2)} ไร่ (${fmtNumZero(x.tons, 1)} ตัน)`).join(', ')
+        : 'ยังไม่พบการรายงานพืชรองอื่นในพื้นที่นี้';
+
+    // Top sub-unit (Tambon or Village)
+    let topUnitName = '-';
+    let topUnitArea = 0;
+    let topUnitPct = 0;
+    if (isDistrict && dist.tambonSummaries.length > 0) {
+      const sortedT = [...dist.tambonSummaries].sort((a, b) => b.summary.totalArea - a.summary.totalArea);
+      topUnitName = `ตำบล${sortedT[0].tambon.name}`;
+      topUnitArea = sortedT[0].summary.totalArea;
+      topUnitPct = dist.totalArea > 0 ? Math.round((topUnitArea / dist.totalArea) * 1000) / 10 : 0;
+    } else if (!isDistrict && activeSummary.villageSummaries.length > 0) {
+      const sortedV = [...activeSummary.villageSummaries].sort((a, b) => b.summary.totalArea - a.summary.totalArea);
+      topUnitName = `หมู่ ${sortedV[0].village.moo} บ้าน${sortedV[0].village.name}`;
+      topUnitArea = sortedV[0].summary.totalArea;
+      topUnitPct = activeSummary.totalArea > 0 ? Math.round((topUnitArea / activeSummary.totalArea) * 1000) / 10 : 0;
+    }
+
+    const totalAllCropArea = appData.crops.reduce((acc, c) => {
+      const a = activeSummary.crops[c.id];
+      return acc + (a.n || 0) + (a.s || 0) + (a.h || 0);
+    }, 0);
+    const riceSharePct = totalAllCropArea > 0 ? Math.round((riceTotalArea / totalAllCropArea) * 1000) / 10 : 0;
+
+    const plainReportText = [
+      `📊 สรุปภาพรวมข้อมูลการผลิตด้านพืช ${scopeTitle}`,
+      `ข้อมูล ณ วันที่ ${m.reportDay} ${m.reportMonth} พ.ศ. ${m.reportYear}`,
+      `• เกษตรกรทั้งหมด: ${fmtNumZero(activeSummary.farmersCount, 0)} ครัวเรือน (${fmtNumZero(activeSummary.plotsCount, 0)} แปลง)`,
+      `• พื้นที่การเกษตรรวม: ${fmtNumZero(activeSummary.totalArea, 2)} ไร่ (เฉลี่ย ${fmtNumZero(avgAreaPerFarmer, 2)} ไร่/ครัวเรือน)`,
+      `• พื้นที่มากที่สุด: ${topUnitName} (${fmtNumZero(topUnitArea, 2)} ไร่ หรือ ${topUnitPct}%)`,
+      `• พืชหลัก (ข้าว มะลิ 105): ${fmtNumZero(riceTotalArea, 2)} ไร่ (${riceSharePct}%) — ยืนต้น ${fmtNumZero(rice.s, 0)} ไร่ (${riceStandingPct}%), เก็บเกี่ยวแล้ว ${fmtNumZero(rice.h, 0)} ไร่ (${riceHarvestPct}%)`,
+      `• คาดการณ์ผลผลิตข้าวรวม: ${fmtNumZero(riceTons, 2)} ตัน (${fmtNumZero(rice.p, 0)} กก. | เฉลี่ย ${fmtNumZero(rice.y, 0)} กก./ไร่)`,
+      `• พืชเศรษฐกิจอื่นๆ: ${otherCropsSummaryText}`,
+    ].join('\n');
+
+    const execSummaryHtml = `
+      <div class="present-exit-bar no-print">
+        <div>🖥️ <strong>โหมดนำเสนอข้อมูลภาพรวม</strong> — ${escHtml(scopeTitle)} (ณ วันที่ ${escHtml(m.reportDay)} ${escHtml(m.reportMonth)} ${escHtml(m.reportYear)})</div>
+        <button class="btn btn-sm btn-primary" id="btn-exit-present">✕ ออกจากโหมดนำเสนอ</button>
+      </div>
+      <div class="exec-summary-card">
+        <div class="exec-header">
+          <div>
+            <div class="exec-title">📋 บทสรุปและนำเสนอภาพรวมการผลิตด้านพืช — ${escHtml(scopeTitle)}</div>
+            <div class="exec-subtitle">ข้อมูล ณ วันที่ ${escHtml(m.reportDay)} ${escHtml(m.reportMonth)} พ.ศ. ${escHtml(m.reportYear)} • สรุปประเด็นสำคัญเพื่อการรายงานและนำเสนอ</div>
+          </div>
+          <div class="no-print" style="display:flex;gap:8px;">
+            <button class="btn btn-outline btn-sm" id="btn-copy-summary">📋 คัดลอกบทสรุปรายงาน</button>
+          </div>
+        </div>
+        <div class="exec-narrative">
+          ภาพรวมการผลิตด้านพืชของ <strong>${escHtml(scopeTitle)}</strong> มีเกษตรกรขึ้นทะเบียนรวม <strong>${fmtNumZero(activeSummary.farmersCount, 0)} ครัวเรือน</strong>
+          (${fmtNumZero(activeSummary.plotsCount, 0)} แปลง) ครอบคลุมพื้นที่การเกษตรทั้งหมด <strong>${fmtNumZero(activeSummary.totalArea, 2)} ไร่</strong>
+          โดยมี <strong>${escHtml(topUnitName)}</strong> เป็นพื้นที่เพาะปลูกขนาดใหญ่ที่สุด (${fmtNumZero(topUnitArea, 2)} ไร่ คิดเป็น ${topUnitPct}%)
+          พืชเศรษฐกิจหลักคือ <strong>ข้าว (พันธุ์มะลิ 105)</strong> คิดเป็นสัดส่วน <strong>${riceSharePct}%</strong> ของพื้นที่เพาะปลูกทั้งหมด
+          คาดการณ์ผลผลิตข้าวรวม <strong>${fmtNumZero(riceTons, 2)} ตัน</strong> (${fmtNumZero(rice.p, 0)} กก. เฉลี่ย ${fmtNumZero(rice.y, 0)} กก./ไร่)
+          ปัจจุบันเก็บเกี่ยวแล้ว <strong>${riceHarvestPct}%</strong> และอยู่ระหว่างยืนต้น <strong>${riceStandingPct}%</strong>
+          ${otherCropsList.length > 0 ? `นอกจากนี้ยังมีพืชเศรษฐกิจรอง ได้แก่ <strong>${escHtml(otherCropsSummaryText)}</strong>` : ''}
+        </div>
+        <div class="insights-grid">
+          <div class="insight-box">
+            <div class="insight-label">🏅 พื้นที่เพาะปลูกมากที่สุด</div>
+            <div class="insight-value">${escHtml(topUnitName)}</div>
+            <div class="insight-desc">${fmtNumZero(topUnitArea, 2)} ไร่ (คิดเป็น ${topUnitPct}% ของพื้นที่ทั้งหมด)</div>
+          </div>
+          <div class="insight-box">
+            <div class="insight-label">🌾 สถานะพื้นที่ข้าว (ยืนต้น vs เก็บเกี่ยว)</div>
+            <div class="insight-value">เก็บเกี่ยวแล้ว ${riceHarvestPct}%</div>
+            <div class="insight-desc">ยืนต้น ${fmtNumZero(rice.s, 0)} ไร่ (${riceStandingPct}%) • เก็บเกี่ยว ${fmtNumZero(rice.h, 0)} ไร่</div>
+            <div class="progress-track" title="ฟ้า=เก็บเกี่ยว, เขียว=ยืนต้น, ส้ม=ปลูกใหม่">
+              <div class="progress-seg-harvest" style="width:${riceHarvestPct}%"></div>
+              <div class="progress-seg-standing" style="width:${riceStandingPct}%"></div>
+              <div class="progress-seg-new" style="width:${riceNewPct}%"></div>
+            </div>
+          </div>
+          <div class="insight-box">
+            <div class="insight-label">📐 ขนาดพื้นที่เฉลี่ยต่อครัวเรือน</div>
+            <div class="insight-value">${fmtNumZero(avgAreaPerFarmer, 2)} ไร่ / ราย</div>
+            <div class="insight-desc">เฉลี่ยถือครอง ${fmtNumZero(avgPlotsPerFarmer, 2)} แปลงต่อครัวเรือน</div>
+          </div>
+          <div class="insight-box">
+            <div class="insight-label">🌱 พืชเศรษฐกิจรองในพื้นที่</div>
+            <div class="insight-value">${otherCropsList.length} ชนิดพืช</div>
+            <div class="insight-desc">${escHtml(otherCropsSummaryText)}</div>
+          </div>
+        </div>
       </div>
     `;
 
@@ -431,6 +550,7 @@
       : `📊 เปรียบเทียบพื้นที่การเกษตร (ไร่) และผลผลิตข้าว (ตัน) ตำบล${escHtml(activeTambon.name)}`;
 
     $('dashboard-view').innerHTML = `
+      ${execSummaryHtml}
       ${cardsSectionHtml}
       <div class="dash-row-2">
         <div class="dash-card">
@@ -530,7 +650,6 @@
         })
       );
 
-      const rice = activeSummary.crops.rice;
       const doughCtx = $('chart-doughnut-rice').getContext('2d');
       dashCharts.push(
         new Chart(doughCtx, {
@@ -572,6 +691,28 @@
     });
     $('btn-dash-goto-ro').addEventListener('click', () => switchView('ro'));
     $('btn-dash-print').addEventListener('click', () => window.print());
+    $('btn-dash-present').addEventListener('click', () => {
+      document.body.classList.add('present-mode');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+    const exitPresentBtn = $('btn-exit-present');
+    if (exitPresentBtn) {
+      exitPresentBtn.addEventListener('click', () => {
+        document.body.classList.remove('present-mode');
+      });
+    }
+    const copyBtn = $('btn-copy-summary');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', () => {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(plainReportText).then(() => {
+            showToast('📋 คัดลอกบทสรุปรายงานแล้ว! นำไปวางใน LINE หรือ Word ได้เลย');
+          });
+        } else {
+          prompt('คัดลอกข้อความสรุปรายงานด้านล่าง:', plainReportText);
+        }
+      });
+    }
 
     document.querySelectorAll('[data-dash-tambon]').forEach((card) => {
       card.addEventListener('click', () => {

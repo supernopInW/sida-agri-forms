@@ -999,6 +999,137 @@ table.agri-table tr.total-row td {
   color: var(--text);
 }
 
+/* EXECUTIVE SUMMARY & PRESENTATION */
+.exec-summary-card {
+  background: linear-gradient(135deg, #f0fdf4 0%, #ffffff 55%, #f0fdfa 100%);
+  border: 1px solid #86efac;
+  border-left: 6px solid var(--primary);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 20px 22px;
+}
+
+.exec-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.exec-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: #14532d;
+}
+
+.exec-subtitle {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.exec-narrative {
+  font-size: 15.5px;
+  line-height: 1.75;
+  color: #1e293b;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid #dcfce7;
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+
+.exec-narrative strong {
+  color: #15803d;
+}
+
+.insights-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.insight-box {
+  background: #ffffff;
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+
+.insight-label {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.insight-value {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.insight-desc {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+
+.progress-track {
+  display: flex;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: #e2e8f0;
+  margin-top: 8px;
+}
+
+.progress-seg-harvest {
+  background: #0ea5e9;
+}
+
+.progress-seg-standing {
+  background: #16a34a;
+}
+
+.progress-seg-new {
+  background: #f59e0b;
+}
+
+/* PRESENTATION MODE */
+body.present-mode .topbar,
+body.present-mode .nav-tabs,
+body.present-mode .toolbar {
+  display: none !important;
+}
+
+body.present-mode .main-content {
+  padding: 20px 28px;
+}
+
+body.present-mode .kpi-strip {
+  padding: 16px 28px 0;
+}
+
+body.present-mode .exec-narrative {
+  font-size: 17px;
+}
+
+.present-exit-bar {
+  display: none;
+  background: #0f172a;
+  color: #fff;
+  padding: 10px 24px;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 14px;
+}
+
+body.present-mode .present-exit-bar {
+  display: flex;
+}
+
 @media (max-width: 960px) {
   .dash-row-2,
   .dash-row-equal {
