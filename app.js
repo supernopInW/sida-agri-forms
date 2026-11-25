@@ -2,7 +2,8 @@
   'use strict';
 
   const ACCESS_PIN = '123456';
-  const STORAGE_KEY = 'sida_agri_data_v1';
+  const STORAGE_KEY = 'sida_agri_data_v2';
+  const LEGACY_STORAGE_KEY = 'sida_agri_data_v1';
   const AUTH_SESSION_KEY = 'sida_agri_auth_ok';
 
   // Application State
@@ -59,11 +60,37 @@
   }
 
   // Persistence
+  function migrateNewToStanding(dataObj) {
+    if (!dataObj || !dataObj.tambons) return;
+    dataObj.tambons.forEach((t) => {
+      t.villages.forEach((v) => {
+        v.plots.forEach((p) => {
+          if (!p.c) return;
+          Object.keys(p.c).forEach((cid) => {
+            const cv = p.c[cid];
+            const n = Number(cv.n || 0);
+            if (n > 0) {
+              cv.s = round4(Number(cv.s || 0) + n);
+              cv.n = 0;
+            }
+          });
+        });
+      });
+    });
+  }
+
   function loadData() {
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        appData = JSON.parse(saved);
+      const savedV2 = localStorage.getItem(STORAGE_KEY);
+      if (savedV2) {
+        appData = JSON.parse(savedV2);
+        return;
+      }
+      const savedV1 = localStorage.getItem(LEGACY_STORAGE_KEY);
+      if (savedV1) {
+        appData = JSON.parse(savedV1);
+        migrateNewToStanding(appData);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(appData));
         return;
       }
     } catch (e) {
