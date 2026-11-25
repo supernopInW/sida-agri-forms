@@ -8,7 +8,8 @@
   // Application State
   let appData = null;
   let state = {
-    view: 'ro', // 'ro' | 'rt' | 'rm'
+    view: 'dashboard', // 'dashboard' | 'ro' | 'rt' | 'rm'
+    dashScope: 'all', // 'all' | tambonId
     tambonId: 't1',
     villageId: 't1_m1',
     search: '',
@@ -17,6 +18,7 @@
     page: 1,
     pageSize: 50,
   };
+  let dashCharts = [];
 
   // DOM Shortcuts
   const $ = (id) => document.getElementById(id);
@@ -310,6 +312,283 @@
       }
     });
     return html;
+  }
+
+  // ========================
+  // VIEW 0: DASHBOARD (แดชบอร์ดภาพรวม)
+  // ========================
+  function destroyDashCharts() {
+    dashCharts.forEach((ch) => {
+      try {
+        ch.destroy();
+      } catch (e) {}
+    });
+    dashCharts = [];
+  }
+
+  function renderDashboard() {
+    destroyDashCharts();
+    const isDistrict = state.dashScope === 'all';
+    const dist = summarizeDistrict();
+    const activeTambon = isDistrict ? null : getTambon(state.dashScope);
+    const activeSummary = isDistrict ? dist : summarizeTambon(activeTambon);
+    updateKPIs(activeSummary);
+
+    // Toolbar
+    const scopeOptions =
+      `<option value="all" ${isDistrict ? 'selected' : ''}>ภาพรวมทั้งอำเภอสีดา (5 ตำบล / 50 หมู่บ้าน)</option>` +
+      appData.tambons
+        .map((t) => `<option value="${t.id}" ${state.dashScope === t.id ? 'selected' : ''}>ตำบล${escHtml(t.name)} (${t.villages.length} หมู่บ้าน)</option>`)
+        .join('');
+
+    $('toolbar').innerHTML = `
+      <div class="toolbar-group">
+        <label>ขอบเขตแดชบอร์ด:</label>
+        <select id="sel-dash-scope">${scopeOptions}</select>
+      </div>
+      <div class="toolbar-right">
+        <button class="btn btn-primary btn-sm" id="btn-dash-add">+ เพิ่มเกษตรกร / แปลง (รม.)</button>
+        <button class="btn btn-secondary btn-sm" id="btn-dash-goto-ro">🏛️ เปิดแบบ รอ.</button>
+        <button class="btn btn-outline btn-sm" id="btn-dash-print">🖨️ พิมพ์แดชบอร์ด</button>
+      </div>
+    `;
+
+    // Build Tambon / Village Quick Cards
+    let cardsSectionHtml = '';
+    if (isDistrict) {
+      const miniCards = dist.tambonSummaries
+        .map(
+          (item) => `
+          <div class="tambon-mini-card" data-dash-tambon="${item.tambon.id}">
+            <div class="tambon-mini-title">ตำบล${escHtml(item.tambon.name)} (${item.tambon.villages.length} หมู่)</div>
+            <div class="tambon-mini-stat"><span>ครัวเรือน</span><strong>${fmtNumZero(item.summary.farmersCount, 0)} ราย</strong></div>
+            <div class="tambon-mini-stat"><span>พื้นที่เกษตร</span><strong>${fmtNumZero(item.summary.totalArea, 2)} ไร่</strong></div>
+            <div class="tambon-mini-stat"><span>ผลผลิตข้าว</span><strong>${fmtNumZero(item.summary.crops.rice.p / 1000, 1)} ตัน</strong></div>
+          </div>`
+        )
+        .join('');
+      cardsSectionHtml = `
+        <div class="dash-card">
+          <div class="dash-card-header">
+            <div class="dash-card-title">🏘️ สรุปข้อมูลรายตำบล อำเภอสีดา (คลิกเพื่อดูรายละเอียด)</div>
+            <div class="dash-card-sub">อัปเดตอัตโนมัติจากแบบ รม. ทุกหมู่บ้าน</div>
+          </div>
+          <div class="tambon-cards-grid">${miniCards}</div>
+        </div>
+      `;
+    }
+
+    // Crop Summary Table
+    const cropRows = appData.crops
+      .map((crop) => {
+        const a = activeSummary.crops[crop.id];
+        const totalCropArea = round4((a.n || 0) + (a.s || 0) + (a.h || 0));
+        const hasData = totalCropArea > 0 || a.p > 0;
+        return `
+          <tr style="${hasData ? '' : 'opacity:0.48;'}">
+            <td><strong>${crop.num}. ${escHtml(crop.name)}</strong>${crop.variety ? ` <span style="color:#64748b;font-size:12px;">(${escHtml(crop.variety)})</span>` : ''}</td>
+            <td class="num">${fmtNumZero(a.n, 2)}</td>
+            <td class="num">${fmtNumZero(a.s, 2)}</td>
+            <td class="num">${fmtNumZero(a.h, 2)}</td>
+            <td class="num"><strong>${fmtNumZero(a.p, 0)}</strong></td>
+            <td class="num">${fmtNumZero(a.p / 1000, 2)}</td>
+            <td class="num">${fmtNumZero(a.y, 0)}</td>
+          </tr>
+        `;
+      })
+      .join('');
+
+    // Top 10 Villages by Area
+    const allVillages = [];
+    const targetTambons = isDistrict ? appData.tambons : [activeTambon];
+    targetTambons.forEach((t) => {
+      t.villages.forEach((v) => {
+        const vs = summarizeVillage(v);
+        allVillages.push({ tambon: t, village: v, summary: vs });
+      });
+    });
+    allVillages.sort((a, b) => b.summary.totalArea - a.summary.totalArea);
+    const topVillages = allVillages.slice(0, 10);
+    const maxArea = topVillages.length > 0 ? Math.max(1, topVillages[0].summary.totalArea) : 1;
+
+    const topRankHtml = topVillages
+      .map((item, idx) => {
+        const pct = Math.min(100, Math.round((item.summary.totalArea / maxArea) * 100));
+        return `
+          <div class="rank-item" data-rank-tambon="${item.tambon.id}" data-rank-village="${item.village.id}" title="คลิกเพื่อเปิดแบบ รม. หมู่บ้านนี้">
+            <div class="rank-top">
+              <span class="rank-name">${idx + 1}. บ้าน${escHtml(item.village.name)} (ม.${item.village.moo} ต.${escHtml(item.tambon.name)})</span>
+              <span class="rank-meta"><strong>${fmtNumZero(item.summary.totalArea, 2)} ไร่</strong> • ${fmtNumZero(item.summary.farmersCount, 0)} ราย</span>
+            </div>
+            <div class="rank-bar-bg"><div class="rank-bar-fill" style="width:${pct}%"></div></div>
+          </div>
+        `;
+      })
+      .join('');
+
+    const barTitle = isDistrict
+      ? '📊 เปรียบเทียบพื้นที่การเกษตร (ไร่) และผลผลิตข้าว (ตัน) แยกรายตำบล'
+      : `📊 เปรียบเทียบพื้นที่การเกษตร (ไร่) และผลผลิตข้าว (ตัน) ตำบล${escHtml(activeTambon.name)}`;
+
+    $('dashboard-view').innerHTML = `
+      ${cardsSectionHtml}
+      <div class="dash-row-2">
+        <div class="dash-card">
+          <div class="dash-card-header">
+            <div class="dash-card-title">${barTitle}</div>
+            <div class="dash-card-sub">หน่วย: ไร่ / ตัน</div>
+          </div>
+          <div class="chart-box"><canvas id="chart-bar-main"></canvas></div>
+        </div>
+        <div class="dash-card">
+          <div class="dash-card-header">
+            <div class="dash-card-title">🌾 สัดส่วนสถานะพื้นที่ข้าว (ไร่)</div>
+            <div class="dash-card-sub">ปลูกใหม่ • ยืนต้น • เก็บเกี่ยว</div>
+          </div>
+          <div class="chart-box-sm"><canvas id="chart-doughnut-rice"></canvas></div>
+        </div>
+      </div>
+
+      <div class="dash-row-equal">
+        <div class="dash-card">
+          <div class="dash-card-header">
+            <div class="dash-card-title">🌱 สรุปผลผลิตแยกตามชนิดพืชทั้ง 10 ชนิด</div>
+            <div class="dash-card-sub">${isDistrict ? 'อำเภอสีดา' : 'ตำบล' + escHtml(activeTambon.name)}</div>
+          </div>
+          <div style="overflow-x:auto;">
+            <table class="dash-table">
+              <thead>
+                <tr>
+                  <th>ชนิดพืช</th>
+                  <th class="num">ปลูกใหม่ (ไร่)</th>
+                  <th class="num">ยืนต้น (ไร่)</th>
+                  <th class="num">เก็บเกี่ยว (ไร่)</th>
+                  <th class="num">ผลผลิต (กก.)</th>
+                  <th class="num">ผลผลิต (ตัน)</th>
+                  <th class="num">เฉลี่ย (กก./ไร่)</th>
+                </tr>
+              </thead>
+              <tbody>${cropRows}</tbody>
+            </table>
+          </div>
+        </div>
+        <div class="dash-card">
+          <div class="dash-card-header">
+            <div class="dash-card-title">🏆 อันดับหมู่บ้านพื้นที่การเกษตรสูงสุด (Top ${topVillages.length})</div>
+            <div class="dash-card-sub">คลิกที่หมู่บ้านเพื่อแก้ไขแบบ รม.</div>
+          </div>
+          <div class="rank-list">${topRankHtml}</div>
+        </div>
+      </div>
+    `;
+
+    // Render Chart.js graphs
+    if (typeof Chart !== 'undefined') {
+      Chart.defaults.font.family = "'Sarabun', sans-serif";
+
+      const labels = isDistrict
+        ? dist.tambonSummaries.map((x) => 'ต.' + x.tambon.name)
+        : activeSummary.villageSummaries.map((x) => `ม.${x.village.moo} ${x.village.name}`);
+      const areaData = isDistrict
+        ? dist.tambonSummaries.map((x) => round4(x.summary.totalArea))
+        : activeSummary.villageSummaries.map((x) => round4(x.summary.totalArea));
+      const riceTonsData = isDistrict
+        ? dist.tambonSummaries.map((x) => Math.round(x.summary.crops.rice.p / 1000))
+        : activeSummary.villageSummaries.map((x) => Math.round(x.summary.crops.rice.p / 1000));
+
+      const barCtx = $('chart-bar-main').getContext('2d');
+      dashCharts.push(
+        new Chart(barCtx, {
+          type: 'bar',
+          data: {
+            labels,
+            datasets: [
+              {
+                label: 'พื้นที่การเกษตร (ไร่)',
+                data: areaData,
+                backgroundColor: 'rgba(21, 128, 61, 0.82)',
+                borderRadius: 6,
+              },
+              {
+                label: 'ผลผลิตข้าว (ตัน)',
+                data: riceTonsData,
+                backgroundColor: 'rgba(14, 116, 144, 0.78)',
+                borderRadius: 6,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { position: 'top' },
+            },
+            scales: {
+              y: { beginAtZero: true },
+            },
+          },
+        })
+      );
+
+      const rice = activeSummary.crops.rice;
+      const doughCtx = $('chart-doughnut-rice').getContext('2d');
+      dashCharts.push(
+        new Chart(doughCtx, {
+          type: 'doughnut',
+          data: {
+            labels: ['พื้นที่ปลูกใหม่ (ไร่)', 'พื้นที่ยืนต้น (ไร่)', 'พื้นที่เก็บเกี่ยว (ไร่)'],
+            datasets: [
+              {
+                data: [rice.n || 0, rice.s || 0, rice.h || 0],
+                backgroundColor: ['#f59e0b', '#16a34a', '#0ea5e9'],
+                borderWidth: 2,
+                borderColor: '#ffffff',
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            cutout: '58%',
+            plugins: {
+              legend: { position: 'bottom' },
+            },
+          },
+        })
+      );
+    }
+
+    // Bind Dashboard events
+    $('sel-dash-scope').addEventListener('change', (e) => {
+      state.dashScope = e.target.value;
+      render();
+    });
+    $('btn-dash-add').addEventListener('click', () => {
+      if (!isDistrict) {
+        state.tambonId = state.dashScope;
+        state.villageId = getTambon(state.tambonId).villages[0].id;
+      }
+      openPlotModal(-1);
+    });
+    $('btn-dash-goto-ro').addEventListener('click', () => switchView('ro'));
+    $('btn-dash-print').addEventListener('click', () => window.print());
+
+    document.querySelectorAll('[data-dash-tambon]').forEach((card) => {
+      card.addEventListener('click', () => {
+        state.dashScope = card.dataset.dashTambon;
+        render();
+      });
+    });
+
+    document.querySelectorAll('[data-rank-village]').forEach((item) => {
+      item.addEventListener('click', () => {
+        state.tambonId = item.dataset.rankTambon;
+        state.villageId = item.dataset.rankVillage;
+        state.page = 1;
+        state.search = '';
+        switchView('rm');
+      });
+    });
   }
 
   // ========================
@@ -1193,7 +1472,11 @@
 
   function render() {
     updateHeaderDate();
-    if (state.view === 'ro') renderViewRO();
+    const isDash = state.view === 'dashboard';
+    $('dashboard-view').hidden = !isDash;
+    $('form-paper').hidden = isDash;
+    if (isDash) renderDashboard();
+    else if (state.view === 'ro') renderViewRO();
     else if (state.view === 'rt') renderViewRT();
     else renderViewRM();
   }

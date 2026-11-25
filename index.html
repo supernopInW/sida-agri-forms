@@ -10,6 +10,8 @@
   <link rel="stylesheet" href="styles.css" />
   <!-- SheetJS for official Excel (.xlsx) export -->
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <!-- Chart.js for interactive Dashboard charts -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 </head>
 <body>
   <!-- LOGIN SCREEN -->
@@ -59,7 +61,8 @@
 
     <!-- NAVIGATION TABS -->
     <nav class="nav-tabs no-print">
-      <button class="nav-tab active" data-view="ro">🏛️ แบบ รอ. (รายอำเภอ)</button>
+      <button class="nav-tab active" data-view="dashboard">📊 แดชบอร์ดภาพรวม</button>
+      <button class="nav-tab" data-view="ro">🏛️ แบบ รอ. (รายอำเภอ)</button>
       <button class="nav-tab" data-view="rt">🏘️ แบบ รต. (รายตำบล)</button>
       <button class="nav-tab" data-view="rm">🏡 แบบ รม. (รายหมู่บ้าน / เพิ่ม-ลบ-แก้ไข)</button>
       <div class="nav-spacer"></div>
@@ -102,6 +105,7 @@
 
     <!-- FORM PAPER VIEW (PRINTABLE & SCREEN) -->
     <main class="main-content">
+      <div id="dashboard-view" class="dashboard-grid" hidden></div>
       <div class="form-paper" id="form-paper">
         <div class="official-header" id="official-header"></div>
         <div class="table-wrapper" id="table-wrapper"></div>
